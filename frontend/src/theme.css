@@ -434,7 +434,9 @@ body {
 }
 .modal-input::placeholder { color: var(--text-faint); }
 
-/* Borderless × close button. DivergencePanel/FileHistoryPanel/AnnotationBubble. */
+/* Borderless × close button — THE close/dismiss affordance; don't hand-roll one.
+   Consumers that set a scoped `color: inherit` must restate :hover locally
+   (component-scoped rules out-specify this one). */
 .close-btn {
   background: transparent;
   border: none;

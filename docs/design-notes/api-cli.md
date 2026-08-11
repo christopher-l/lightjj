@@ -121,15 +121,16 @@ silently launches the server. Add a `flag.NArg() > 0` → usage-error guard in
 lightjj api [flags] METHOD PATH [BODY]
 
   METHOD   GET | POST | PUT | DELETE | PATCH (case-insensitive, uppercased)
-  PATH     verbatim URL path, including query string. Not auto-prefixed —
-           agent_api.md teaches `<base> = /tab/{N}`, callers spell it out.
+  PATH     URL path, including query string. A tab-relative `/api/...` is
+           prefixed with the tab discovery matched for the cwd (see Tab
+           targeting); an explicit `/tab/N/...` is sent verbatim.
   BODY     literal JSON | @file (path relative to CWD) | "-" for stdin.
            Optional. Bodies that literally start with `@` or are exactly `-`
            must use the file/stdin form — same ambiguity as curl.
 
 flags:
   --addr   host:port — bypass discovery entirely (no session-dir reads or
-           warnings). Loopback only — see Security model.
+           warnings; PATH sent verbatim). Loopback only — see Security model.
   --repo   path — match a different repo than cwd
   -H       "Key: Value" — extra header (repeatable)
 
@@ -154,23 +155,58 @@ mystery 400.
 **Quote query strings.** Bare `&` backgrounds the shell command. The
 agent_api.md rewrite leads every example with the quoted form.
 
-**No auto-prefix of `/tab/N`.** Tab-scoped routes (`/tab/{N}/api/...`) make up
-nearly all of the surface; the few root-mounted exceptions are `GET|POST
-/tabs`, `DELETE /tabs/{id}`, and `GET|POST /api/config[/raw]` (registered
-inline in `tabs.go` `NewTabManager`; `/api/config` is *also* registered on
-each per-tab `Server.Mux`, so both `/api/config` and `/tab/0/api/config`
-work). Everything else — including `/api/agent`, `/api/capabilities`, `/api`
-— lives under `/tab/{N}/`. The root list is small and stable, so
-auto-prefixing is feasible, but verbatim paths match what `agent_api.md`
-teaches and avoid a two-mode mental model. Note the failure mode: an
-unprefixed `/api/...` path falls through to the SPA `/` catch-all and returns
-**HTML, not a 404** — confusing for an agent. The agent_api.md rewrite calls
-this out.
+**Tab targeting (v2).** Tab-scoped routes (`/tab/{N}/api/...`) make up nearly
+all of the surface; the few root-mounted exceptions are `GET|POST /tabs`,
+`DELETE /tabs/{id}`, `GET|POST /api/config[/raw]` and `GET|POST
+/api/state/recent-actions` (registered inline in `tabs.go` `NewTabManager`) —
+and every root `/api/*` route is *also* registered on each per-tab
+`Server.Mux`, so `/tab/N/api/config` works too. That last fact is what makes
+the v2 rule safe: after discovery has matched a tab (see Discovery step 5),
+`resolveTabPath` prefixes a PATH of exactly `/api` or starting with `/api/`
+(or `/api?`) with `/tab/{matched-id}` — there is no `/api/*` path this can
+break, and it retires the v1 footgun where an unprefixed `/api/...` fell
+through to the SPA `/` catch-all and returned **HTML, not a 404**. An explicit
+`/tab/N/...` (or any non-`/api` path such as `/tabs`) is sent verbatim: the
+caller chose. When the matched tab is not the launch tab, one stderr line
+announces it —
+
+```
+lightjj api: tab 2 (/Users/alice/src/other-repo) → /tab/2/api/log
+```
+
+— and if the caller spelled a *different* tab explicitly (an agent copying
+`/tab/0/` examples while its cwd is in tab 2's repo) the line says so instead
+of silently reading the wrong repo:
+
+```
+lightjj api: cwd is in tab 2 (/Users/alice/src/other-repo) but PATH targets /tab/0/ explicitly — pass /api/... to target tab 2
+```
+
+The launch-tab match (the common case) is silent. `--addr` bypasses discovery,
+so there is no matched tab and PATH is verbatim — spell out `/tab/N/`.
+Pre-tabs session files match via `RepoDir`, which is tab 0 on every version
+that writes session files, so they resolve as tab `0` with no special case.
+
+**Version stamp.** The session file carries the writing binary's
+`resolvedVersion()` (`version`). After discovery, `lightjj api` compares it to
+its own and prints one stderr warning on mismatch — the stale-`go:embed`-binary
+class (a long-running server from an old build, or a freshly built CLI talking
+to yesterday's server). The request is still sent; a missing stamp (older
+server) is silent. Only the `X.Y.Z` release core is compared (`releaseCore`):
+`+dirty` metadata and pre-release suffixes are ignored, and non-release builds
+(`dev` from `go run`, Go VCS pseudo-versions) never warn — otherwise the
+two-terminal dev loop (go-run server + built CLI) would warn on every call.
+A shutdown latch in `sessionWriter` keeps a tab handler racing the exit
+signal from re-creating the file after `Remove()`.
+
+```
+lightjj api: warning: session pid 12345 runs lightjj 1.36.0 but this binary is 1.36.1 — one of them is stale
+```
 
 ## Discovery
 
 ```
-discoverSession(dir, repoPath string) (sessionInfo, error)
+discoverSession(dir, repoPath string) (sessionInfo, sessionTab, error)
 ```
 
 Steps. The production caller resolves `dir` via a **read-only**
@@ -180,24 +216,35 @@ not create directories. `verifyOwnedDir` failure is a hard error (Security §1).
 `ENOENT` is "no sessions, lightjj not running."
 
 1. List `dir/*.json` via `readSessions(dir)` — the shared helper for `lightjj
-   api` and `lightjj sessions`. It enforces a **per-file size cap of 4 KiB**
-   before parse (legit files are ~150 bytes; an oversized file is corruption
-   or a planted DoS). Skip unparseable, oversized, or schema-invalid entries.
+   api` and `lightjj sessions`. It enforces a **per-file size cap of 64 KiB**
+   before parse (legit files are ~200 bytes + ~100 per open tab; an oversized
+   file is corruption or a planted DoS — the cap was 4 KiB before the `tabs`
+   array, which a few dozen long-path tabs could have crossed silently). Skip
+   unparseable, oversized, or schema-invalid entries.
    **Skip entries where `cleaned := filepath.Clean(RepoDir); cleaned == "" ||
    cleaned == "/" || !filepath.IsAbs(cleaned)`** — a `/`, `//`, `/.`, or
    relative `RepoDir` would universally match (or error in `filepath.Rel`).
-   `Clean` first so byte-distinct aliases of `/` don't slip through.
+   `Clean` first so byte-distinct aliases of `/` don't slip through. A session
+   failing this is dropped wholesale (tabs and all); the same pre-filter is
+   re-applied to each individual tab path in step 5 (`resolveCandidatePath`).
 2. Filter `pidAlive(pid)` — freshness, not trust (Security §3).
-3. **Filter `Mode == "local"`.** SSH-mode sessions hold the *remote* path in
-   `RepoDir`; if a remote path string coincidentally exists locally (synced
+3. **Filter `Mode == "local"`.** SSH-mode sessions hold *remote* paths in
+   `RepoDir` and every `tabs[].path`; if a remote path string coincidentally exists locally (synced
    dotfiles, same `~/code/foo` layout on laptop and remote dev box — common), a
    containment match would silently route the agent's writes to the *wrong
    machine's repo*. SSH sessions
    stay reachable via `--addr` and are listed in `lightjj sessions` and in the
    no-match error message.
 4. **Validate `Addr`** per Security §2. Reject and skip on failure.
-5. **Containment match.** Resolve `repoPath` (default: cwd, or `--repo`) and
-   each candidate `RepoDir` via `filepath.EvalSymlinks` — **both sides**, so
+5. **Containment match, per tab path.** The candidate paths of a session are
+   its `tabs[].path` entries (`candidateTabs`; tab 0 == `RepoDir` is in the
+   list) — or, for a pre-tabs session file, `RepoDir` alone synthesized as
+   tab `0`. A tab whose `id` isn't a canonical non-negative integer is dropped
+   (the id is later embedded in the request path). Within one session the
+   **deepest matching tab wins** (nested repos `/a` and `/a/b` open as two
+   tabs: cwd in `/a/b` targets the inner one), yielding at most one candidate
+   per session for step 6. Resolve `repoPath` (default: cwd, or `--repo`) and
+   each candidate path via `filepath.EvalSymlinks` — **both sides**, so
    the comparison is robust regardless of whether `jj workspace root` (the
    `RepoDir` producer) resolves symlinks. (`jj workspace root` does on macOS
    per local probe — `/tmp/x` → `/private/tmp/x` — but resolving both sides
@@ -218,30 +265,48 @@ not create directories. `verifyOwnedDir` failure is a hard error (Security §1).
    // rel == "." (exact match) is the common case and is a match.
    ```
 
-6. **Most-specific (deepest) `RepoDir` wins.** Among matching candidates, all
-   `RepoDir`s are ancestors of `repoPath` and therefore prefixes of one
-   another, so byte length and component depth agree on the winner. Tie (two
-   lightjj instances on the *same* `RepoDir`) → error listing PID, Addr,
-   StartedAt for each, suggest `--addr`. Don't auto-pick; a stale instance
-   could shadow a fresh one.
+6. **Most-specific (deepest) path wins.** Among matching candidates, all
+   paths are ancestors of `repoPath` and therefore prefixes of one another,
+   so byte length and component depth agree on the winner — a deeper tab in
+   session B beats session A's shallower launch repo. Tie (two lightjj
+   instances with the *same* repo open, as launch repo or tab) → error
+   listing PID, Addr, tab id, StartedAt for each, suggest `--addr`. Don't
+   auto-pick; a stale instance could shadow a fresh one.
 7. Zero matches → error listing all alive sessions (local and SSH, with their
-   `RepoDir` and addr), suggest `--repo`, `--addr`, or starting lightjj.
+   `RepoDir`, extra tabs, and addr), suggest `--repo`, `--addr`, or starting
+   lightjj.
 
-`discoverSession` takes `dir` as a parameter (not calling `sessionDirReadOnly()`
-internally) so tests pass `t.TempDir()`.
+`discoverSession` returns the matched `sessionTab` alongside the session so
+`runAPISubcommand` can target it (Tab targeting above). It takes `dir` as a
+parameter (not calling `sessionDirReadOnly()` internally) so tests pass
+`t.TempDir()`.
 
-### Known gap: multi-tab / multi-workspace
+### Multi-tab / multi-workspace (resolved in v2)
 
-The session file holds exactly one `RepoDir`: the launch tab's path. A lightjj
-instance with additional tabs (other repos, secondary workspaces) is not
-discoverable by an agent whose cwd is inside a non-launch tab's repo —
-discovery says "no session" even though the running instance has it open at
-`/tab/2/`. The agent can't `GET /tabs` to find the tab number because it
-doesn't have the addr. **Documented v1 gap.** v2 candidate: write a
-`tabs: [{path}]` array to the session file on tab create/close (the data
-already flows through `SetOpenTabs` in state.go). Until then: zero-match error
-output lists running sessions' addrs so the user can `--addr` and `GET /tabs`
-manually.
+v1's session file held exactly one `RepoDir` — the launch tab's path — so an
+instance with additional tabs (other repos, secondary workspaces) was not
+discoverable by an agent whose cwd was inside a non-launch tab's repo:
+discovery said "no session" although the instance had it open at `/tab/2/`,
+and the agent couldn't `GET /tabs` to learn the tab number without the addr.
+
+v2 writes `tabs: [{id, path}]` (tab 0 included) into the session file and
+keeps it current. The hook is deliberately narrow so `internal/api` stays
+ignorant of session files (a `cmd/lightjj` concern): `TabManager` exposes
+`TabRefs() []TabRef` (id + canonical path, id order, RLock snapshot) and an
+`OnTabsChange func()` field fired from `tabsChanged()` — the one helper both
+`handleCreate` and `handleClose` call after writing their response, right
+where `persistTabs` (state.json) already ran. Startup `AddTab` calls don't
+fire it; `main.go` takes the initial snapshot after the restore loop, then
+sets `tm.OnTabsChange = session.Update`. The callback carries **no snapshot**
+on purpose: two concurrent creates would race to deliver stale snapshots in
+either order, so `sessionWriter.Update` calls the `TabRefs` snapshot func
+*inside* its own mutex, making fetch + atomic write one step — the last
+rename always reflects the latest tab set. Writes are temp-file-in-same-dir +
+`rename` (0600 via `os.CreateTemp`; the temp name doesn't end in `.json`, so
+`readSessions`/`sweepStaleSessions` ignore it) because the file is now
+rewritten while `lightjj api` may be mid-read. SSH-mode sessions carry their
+(remote) tab paths too — harmless, step 3 drops the session before any path
+is matched, and `lightjj sessions` gets to list them.
 
 ## Request
 
@@ -294,10 +359,29 @@ including SSH-mode (which `lightjj api` discovery filters out — `sessions` is
 where you go to find the addr to pass with `--addr`).
 
 ```
-PID    ADDR              MODE   REPO
-12345  127.0.0.1:54321   local  /home/alice/src/lightjj
-67890  127.0.0.1:54322   ssh    /home/user/repo
+PID    ADDR              MODE   VERSION  REPO
+12345  127.0.0.1:54321   local  1.36.1   /home/alice/src/lightjj
+                                           tab 2: /home/alice/src/other-repo
+67890  127.0.0.1:54322   ssh    -        /home/user/repo
 ```
+
+`VERSION` is the session's binary version stamp (`-` for a pre-stamp
+server); extra tabs (tab 0 is the REPO column) follow as continuation rows.
+`--json` emits the full `sessionInfo` records — `version` and the complete
+`tabs: [{id, path}]` array (always `[]`, never `null`, for old-format files).
+
+Session file schema (`sessions/<pid>.json`, 0600):
+
+```json
+{"pid":12345,"addr":"127.0.0.1:54321","port":54321,
+ "repo_dir":"/home/alice/src/lightjj","mode":"local","started_at":1760000000000,
+ "version":"1.36.1",
+ "tabs":[{"id":"0","path":"/home/alice/src/lightjj"},
+         {"id":"2","path":"/home/alice/src/other-repo"}]}
+```
+
+`version` is `omitempty`; `tabs` is always present from a v2 writer. Readers
+must tolerate both fields being absent (v1 writers).
 
 Same hardening as `lightjj api` discovery: resolves the dir via
 `sessionDirReadOnly()` (`verifyOwnedDir` hard-error, no `MkdirAll`), reads via
@@ -308,20 +392,34 @@ ownership check *more* important here, not less.
 ## Files
 
 - `cmd/lightjj/api_cmd.go` — `runAPISubcommand`, `runSessionsSubcommand`,
-  `discoverSession`, `doAPIRequest`, `validateAddr`. Same package as
-  `session_file.go` so `sessionInfo`/`pidAlive`/`verifyOwnedDir` stay
-  unexported.
-- `cmd/lightjj/api_cmd_test.go` — discovery table tests (fake session dir),
-  containment-matcher table tests (with macOS `/tmp`→`/private/tmp` row),
-  addr-validation table tests, request tests against `httptest.Server`.
-- `cmd/lightjj/main.go` — pre-`flag.Parse()` dispatch (~6 lines).
-- `cmd/lightjj/session_file.go` — extract `readSessions(dir) ([]sessionInfo, error)`
-  (shared by `lightjj api` discovery and `lightjj sessions`; owns the size
-  cap; `sweepStaleSessions` stays filename-based, doesn't parse JSON, won't be
-  a caller). Extract `resolveSessionPaths() (base, dir string, verify bool)` —
-  the XDG/TempDir branch + verify-flag decision, no fs access; `sessionDir()`
-  (writer: `MkdirAll` + double-verify) and `sessionDirReadOnly()` (reader:
-  verify base **and** `dir`, propagate `ENOENT`, no create) both call it.
+  `discoverSession` (+ `candidateTabs`/`resolveCandidatePath`),
+  `resolveTabPath`/`explicitTabID` (tab targeting), `versionMismatchWarning`,
+  `doAPIRequest`, `validateAddr`. Same package as `session_file.go` so
+  `sessionInfo`/`sessionTab`/`pidAlive`/`verifyOwnedDir` stay unexported.
+- `cmd/lightjj/api_cmd_test.go` — discovery table tests (fake session dir;
+  multi-tab: non-launch tab, nested longest-match, cross-session depth, tie,
+  ssh, bad tab id, old format), containment-matcher table tests (with macOS
+  `/tmp`→`/private/tmp` row), addr-validation table tests, request tests
+  against `httptest.Server`, `runAPISubcommand` end-to-end tab-rewrite +
+  version-warning tests (stderr captured), `sessions` output test.
+- `cmd/lightjj/main.go` — pre-`flag.Parse()` dispatch (~6 lines); builds the
+  `sessionWriter` (identity fields incl. `resolvedVersion()`, snapshot func =
+  `sessionTabsOf(tm.TabRefs())`), initial `Update()` after tab restore,
+  `tm.OnTabsChange = session.Update`, `session.Remove()` on shutdown.
+- `cmd/lightjj/session_file.go` — `sessionInfo`/`sessionTab` schema;
+  `readSessions(dir) ([]sessionInfo, error)` (shared by `lightjj api`
+  discovery and `lightjj sessions`; owns the size cap; normalizes absent
+  `tabs` to `[]`; `sweepStaleSessions` stays filename-based, doesn't parse
+  JSON, won't be a caller). `resolveSessionPaths() (base, dir string, verify
+  bool)` — the XDG/TempDir branch + verify-flag decision, no fs access;
+  `sessionDir()` (writer: `MkdirAll` + double-verify) and
+  `sessionDirReadOnly()` (reader: verify base **and** `dir`, propagate
+  `ENOENT`, no create) both call it. `writeSessionFile` (atomic temp+rename,
+  0600) is the primitive; `sessionWriter` (mutex, fixed identity, snapshot
+  func, `Update`/`Remove`) is what `main.go` holds; `sessionTabsOf` adapts
+  `[]api.TabRef`.
+- `internal/api/tabs.go` — `TabRef`, `TabRefs()`, `OnTabsChange`,
+  `tabsChanged()` (the v2 hook; see Multi-tab above).
 - `internal/api/agent_api.md` — lead with `lightjj api`, demote curl/`jq` to a
   "no `lightjj` on PATH" fallback section. Lead every example with the quoted
   CLI form: `lightjj api GET '/tab/0/api/file-show?revision=@&path=...'`.
@@ -347,11 +445,11 @@ ownership check *more* important here, not less.
 - **Exit codes**: invoke `runAPISubcommand` directly, assert return value
   for each exit-code class.
 
-## Out of scope (v1)
+## Out of scope
 
-- Auto-prefixing `/tab/N`. Verbose paths match `agent_api.md`'s contract.
-- Multi-tab discovery (see Known gap above). Requires session-file schema
-  change.
+- ~~Auto-prefixing `/tab/N`~~ / ~~Multi-tab discovery~~ — both shipped in v2
+  (Tab targeting + Multi-tab sections above); explicit `/tab/N/` paths remain
+  valid and verbatim.
 - Per-session bearer token (closes the `pidAlive` TOCTOU; requires server-side
   change).
 - `lightjj api` over UDS or non-HTTP transport. We don't bind UDS.

@@ -70,7 +70,14 @@ export const zigMode: StreamParser<unknown> = simpleMode({
     { regex: new RegExp(`\\b(?:${KEYWORDS})\\b`), token: 'keyword' },
     // Identifiers — explicit rule so simple-mode doesn't char-step through
     // them one token at a time.
-    { regex: /[a-zA-Z_][a-zA-Z0-9_]*/, token: null },
+    // Classed (not `token: null`) so highlighter.ts stamps data-sym on them —
+    // an unclassed identifier is unhoverable, which left the symbol-hover's
+    // zig entry unreachable (only `@import` got a span, and it isn't an
+    // identifier). Zig convention: TitleCase = type, everything else = value/
+    // function; tok-variableName is deliberately uncolored, so plain
+    // identifiers look unchanged while `Allocator`/`Self` pick up --syn-type.
+    { regex: /[A-Z][a-zA-Z0-9_]*/, token: 'typeName' },
+    { regex: /[a-z_][a-zA-Z0-9_]*/, token: 'variableName' },
   ],
   languageData: {
     commentTokens: { line: '//' },

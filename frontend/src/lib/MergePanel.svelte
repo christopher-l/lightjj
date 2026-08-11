@@ -1,7 +1,11 @@
 <script module lang="ts">
   import { EditorView, keymap, lineNumbers, Decoration, type DecorationSet } from '@codemirror/view'
-  import { EditorState, StateField, StateEffect, Compartment, type Extension } from '@codemirror/state'
-  import { remapBlock, type BlockSource } from './merge-surgery'
+  import { EditorState, StateField, Compartment, type Extension } from '@codemirror/state'
+  import { blockCharRange, type BlockSource } from './merge-surgery'
+  import type { ChangeBlock } from './merge-diff'
+  // Center block tracker (StateField + history inverses + take transaction
+  // shapes) lives in merge-tracker.ts — see there for the position/undo model.
+  import { blockTracker, trackerHistory, takeSpec, takeAllSpec, isTrackerEffect, type CenterBlock } from './merge-tracker'
 
   // Flank highlight — static set, computed once at mount. Read-only panes never
   // change, so a StateField with no update recomputation is fine.
@@ -20,98 +24,22 @@
     })
   }
 
-  // Block center-position tracker. CM6 change-mapping keeps positions valid as
-  // the user edits around (not inside) a block. `source` tracks which side the
-  // center content came from — 'theirs' initially (seed), 'ours' after →,
-  // 'mixed' after user hand-edits inside the block.
-  // newFrom/newTo are NEW-doc positions computed by takeBlock — it knows the
-  // exact surgery (leading/trailing separator, deletion extent) so it can
-  // place the block range precisely. mapPos() in the tracker can't: it only
-  // knows old positions and change deltas, not semantics like "the leading
-  // \n is a separator, not block content".
-  interface ApplyBlockEffect { idx: number; side: 'ours' | 'theirs' | 'both'; newFrom: number; newTo: number }
-  const applyBlock = StateEffect.define<ApplyBlockEffect>()
-  const editInside = StateEffect.define<number>()  // block index → mark mixed
-  // Undo inverse: restores {source, from, to} snapshot captured pre-apply.
-  // Without this, Cmd+Z restores the TEXT but the block stays marked as the
-  // new source (arrow stays dimmed, highlight wrong, counter wrong).
-  //
-  // `map` REQUIRED: CM6 history groups ops within ~75ms. When two takeBlock
-  // calls on DIFFERENT blocks land in the same group, the inverse effect for
-  // block A must be mapped through block B's changes. Without map, identity
-  // mapping leaves stale absolute positions → undo restores wrong range.
-  const restoreBlock = StateEffect.define<{ idx: number; from: number; to: number; source: BlockSource }>({
-    map: (val, mapping) => ({
-      ...val,
-      from: mapping.mapPos(val.from, 1),
-      to: mapping.mapPos(val.to, -1),
-    }),
-  })
-  interface CenterBlock {
-    /** doc position (0-based char offset) of block start. */
-    from: number
-    /** doc position of block end. */
-    to: number
-    /** Which side the center content came from. Drives highlight color. */
-    source: BlockSource
-  }
-  function blockTracker(initial: CenterBlock[]) {
-    return StateField.define<CenterBlock[]>({
-      create() { return initial },
-      update(blocks, tr) {
-        // Position mapping ALWAYS runs first on doc change — applyBlock's target
-        // overrides below. Critical: non-target blocks MUST be mapped through
-        // the change or they retain stale pre-transaction offsets. (Old code
-        // gated mapPos on `result === blocks`, skipping it when applyBlock's
-        // .map() created a fresh array — block 1 kept block-0's old positions.)
-        // remapBlock() handles the whole-block-replace inversion (select-all-
-        // and-type flips assoc) — see merge-surgery.ts + tests.
-        let result: CenterBlock[] = tr.changes.empty
-          ? blocks
-          : blocks.map(b => ({ ...b, ...remapBlock(b, tr.changes) }))
-        // Effects override mapped positions for the target block. applyBlock
-        // carries BOTH newFrom and newTo as explicit new-doc positions —
-        // mapPos() cannot derive these correctly: for a leading-\n insert at
-        // end-of-doc, mapPos(origFrom, -1) stays at the \n separator position,
-        // making the block range include the separator → sourceHighlight
-        // decorates the preceding line, and toggle-back deletion corrupts.
-        for (const e of tr.effects) {
-          if (e.is(applyBlock)) {
-            const { idx, side, newFrom, newTo } = e.value
-            result = result.map((b, i) => i === idx
-              ? { from: newFrom, to: newTo, source: side }
-              : b)
-          } else if (e.is(editInside)) {
-            result = result.map((b, i) => i === e.value
-              ? { ...b, source: 'mixed' as const }
-              : b)
-          } else if (e.is(restoreBlock)) {
-            const { idx, from, to, source } = e.value
-            result = result.map((b, i) => i === idx ? { from, to, source } : b)
-          }
-        }
-        return result
-      },
-    })
-  }
-
   // Center highlight — now driven by the blockTracker StateField directly.
   // Each block's `source` determines its class. Replaces the old static
   // centerHighlight(initial) that drifted as user edited.
-  function sourceHighlight(tracker: StateField<CenterBlock[]>): Extension {
+  function sourceHighlight(tracker: StateField<readonly CenterBlock[]>): Extension {
     return EditorView.decorations.compute([tracker], state => {
       const blocks = state.field(tracker)
       const ranges = []
       for (const b of blocks) {
-        if (b.from >= b.to) continue  // empty/collapsed
+        if (b.from >= b.to) continue  // zero-line block: nothing to paint
         const cls = b.source === 'ours' ? 'merge-from-ours'
                   : b.source === 'theirs' ? 'merge-from-theirs'
                   : b.source === 'both' ? 'merge-from-both'
                   : 'merge-from-mixed'
-        // Decorate each line in the range
-        const startLine = state.doc.lineAt(b.from).number
-        const endLine = state.doc.lineAt(Math.min(b.to, state.doc.length)).number
-        for (let ln = startLine; ln <= endLine; ln++) {
+        // Decorate each line in the range (clamped — a decoration past the
+        // last line would throw inside the view update).
+        for (let ln = Math.max(1, b.from); ln < b.to && ln <= state.doc.lines; ln++) {
           ranges.push(Decoration.line({ class: cls }).range(state.doc.line(ln).from))
         }
       }
@@ -122,12 +50,12 @@
 
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { defaultKeymap, indentWithTab, history, historyKeymap, invertedEffects } from '@codemirror/commands'
+  import { defaultKeymap, indentWithTab, historyKeymap, moveLineUp, moveLineDown, copyLineUp, copyLineDown } from '@codemirror/commands'
   import { syntaxHighlighting, defaultHighlightStyle, indentUnit } from '@codemirror/language'
   import { highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
   import { detectIndent, getCmLanguage, cmTheme } from './cm-shared'
-  import { blocksToLineSets, type ChangeBlock } from './merge-diff'
-  import { planTake, planTakeBoth, initialTrackPos } from './merge-surgery'
+  import { blocksToLineSets } from './merge-diff'
+  import { initialTrackPos } from './merge-surgery'
   import type { MergeSides } from './conflict-extract'
 
   interface Props {
@@ -155,14 +83,14 @@
   // Per-block arrow state — mirrors the blockTracker StateField but in Svelte
   // $state so the gutter arrows can react. Updated on every center transaction
   // via updateListener. Dual-tracking is intentional: CM6 owns position mapping
-  // through edits (its ChangeSet.mapPos is the authoritative algorithm), Svelte
-  // owns the arrow DOM.
+  // through edits (the StateField sees every transaction; hand-edits map via
+  // its ChangeSet.mapPos, the authoritative algorithm), Svelte owns the arrow DOM.
   interface ArrowSlot {
     /** pixel y-offset within the scroll area (0 = top of line 1) */
     y: number
     /** Block height in pixels on the flank side. */
     h: number
-    /** Center pane block position (from trackerField doc positions). */
+    /** Center pane block position (from trackerField line ranges). */
     cy: number
     /** Center pane block height. */
     ch: number
@@ -200,9 +128,10 @@
   const blocks: ChangeBlock[] = untrack(() => sides.blocks)
 
   // StateField instance — retained so we can read .state.field(trackerField).
-  let trackerField: StateField<CenterBlock[]> | undefined
+  let trackerField: StateField<readonly CenterBlock[]> | undefined
 
   const ROW_H = 18  // matches cmTheme .cm-line lineHeight
+  const NO_LINE_MOVES = new Set([moveLineUp, moveLineDown, copyLineUp, copyLineDown])
   // 40px gives bezier ribbons enough horizontal span to read as curves.
   // 22px compressed them into unreadable vertical smudges.
   const GUTTER_W = 40
@@ -262,10 +191,10 @@
     })
     theirsView = tv
 
-    // Convert 1-indexed line ranges → 0-indexed doc positions for the tracker.
-    // Center doc seeds with theirs, so initialTrackPos reads bFrom/bTo directly.
+    // Center doc seeds with theirs, so a block's initial center line range IS
+    // its bFrom/bTo — the tracker keeps line ranges, no char conversion.
     const initialTrack: CenterBlock[] = blocks.map(b => ({
-      ...initialTrackPos(tv.state.doc, b),
+      ...initialTrackPos(b),
       source: 'theirs' as const,
     }))
     const tracker = blockTracker(initialTrack)
@@ -276,85 +205,35 @@
         doc: sides.theirs,  // seed with theirs
         extensions: [
           ...sharedExts,
-          history(),
-          // Undo restores TEXT but not StateField state. Register inverse
-          // effects so Cmd+Z also restores block source/positions — otherwise
-          // arrow stays dimmed, highlight stays wrong, counter stays wrong.
-          // applyBlock (arrow click) and editInside (first hand-keystroke)
-          // both snapshot→restore via restoreBlock. editInside inversion works
-          // because restoreBlock's positions ARE correct post-undo: the undo
-          // transaction's mapPos restores to pre-edit positions, and
-          // restoreBlock then writes the SAME pre-edit positions (from the
-          // startState snapshot).
-          invertedEffects.of(tr => {
-            const inv: StateEffect<unknown>[] = []
-            const old = tr.startState.field(tracker)
-            for (const e of tr.effects) {
-              if (e.is(applyBlock)) {
-                inv.push(restoreBlock.of({ idx: e.value.idx, ...old[e.value.idx] }))
-              } else if (e.is(editInside)) {
-                inv.push(restoreBlock.of({ idx: e.value, ...old[e.value] }))
-              } else if (e.is(restoreBlock)) {
-                // Undo dispatches restoreBlock; redo needs the inverse — the
-                // PRE-undo state (= post-applyBlock state). Without this
-                // branch, redo re-applies doc changes but leaves source tag
-                // stale (arrow dimmed, highlight wrong, counter wrong).
-                inv.push(restoreBlock.of({ idx: e.value.idx, ...old[e.value.idx] }))
-              }
-            }
-            return inv
-          }),
-          // editInside as transactionExtender (NOT updateListener dispatch) so
-          // it bundles with the text change — single transaction → in history →
-          // refreshArrows sees the fresh 'mixed' source on the SAME listener
-          // tick (no 1-keystroke lag) → Cmd+Z of the edit also restores source
-          // via the invertedEffects above.
-          //
-          // Exclude applyBlock (arrow click) and restoreBlock (undo/redo of
-          // arrow click or prior hand-edit) — both have their own source-setting.
-          // The extender running on undo would otherwise re-mark 'mixed' and
-          // immediately clobber what restoreBlock just restored.
-          EditorState.transactionExtender.of(tr => {
-            if (!tr.docChanged) return null
-            if (tr.effects.some(e => e.is(applyBlock) || e.is(restoreBlock))) return null
-            // iterChanges yields OLD-doc coords; startState.field = OLD block
-            // positions. Same coord system (unlike u.state.field which is
-            // post-mapping).
-            const tracked = tr.startState.field(tracker)
-            const effects: StateEffect<number>[] = []
-            tr.changes.iterChanges((fromA, toA) => {
-              for (let i = 0; i < tracked.length; i++) {
-                const b = tracked[i]
-                // Non-strict overlap: boundary-touching DELETES affect the
-                // block even though [b.from-1,b.from) doesn't strictly overlap
-                // [b.from,b.to). Backspace at block start joins with preceding
-                // line → block's from maps mid-line → next arrow click garbles
-                // content. Marking 'mixed' makes takeBlock's idempotent-source
-                // check irrelevant (user can still arrow-toggle, but at least
-                // the source indicator is honest). Pure insertions at
-                // boundaries (fromA===toA===b.from) are still OK with <= here:
-                // they don't join lines.
-                if (b.source !== 'mixed' && fromA <= b.to && toA >= b.from) {
-                  effects.push(editInside.of(i))
-                }
-              }
-            })
-            return effects.length ? { effects } : null
-          }),
+          // Undo restores TEXT but not StateField state: trackerHistory
+          // bundles history() with the tracker's whole-array undo/redo
+          // snapshots and the hand-edit → 'mixed' extender (module script —
+          // shared verbatim with the property tests).
+          trackerHistory(tracker),
           highlightActiveLine(),
           highlightActiveLineGutter(),
           tracker,
           sourceHighlight(tracker),  // replaces old static centerHighlight
           EditorView.updateListener.of(u => {
-            // Arrow positions only shift on doc changes. Cursor/selection
-            // updates don't need refreshArrows → skips two $state writes and
-            // the downstream gutter DOM diff on every keystroke.
-            if (!u.docChanged) return
+            // Arrow positions/sources only shift on doc changes or tracker
+            // effects (a zero-line take is a textually EMPTY change that still
+            // flips the source tag). Cursor/selection updates don't need
+            // refreshArrows → skips two $state writes and the downstream
+            // gutter DOM diff on every keystroke.
+            if (!u.docChanged && !u.transactions.some(t => t.effects.some(isTrackerEffect))) return
             dirty = true
             refreshArrows()
           }),
           keymap.of([
-            ...defaultKeymap,
+            // Alt-↑/↓ (move line) and Shift-Alt-↑/↓ (copy line) are dropped:
+            // CM6 implements a line move as delete("\nD") + insert("D\n")
+            // in one transaction, which to the block tracker is "the user
+            // deleted shared line D and typed D into the block" — moving a
+            // block's edge line past a shared neighbour would annex it and
+            // the next arrow click would destroy it. Line moves across
+            // conflict-block boundaries have no defined tracker semantics;
+            // cut/paste (two transactions) behaves.
+            ...defaultKeymap.filter(k => !(k.run && NO_LINE_MOVES.has(k.run))),
             ...historyKeymap,
             indentWithTab,
             { key: 'Mod-s', run: () => { save(); return true } },
@@ -404,19 +283,15 @@
 
   /** Read current block positions from center's StateField → arrow slots.
    *  Flank Y/H from static line ranges (read-only panes). Center Y/H from the
-   *  tracked doc positions (changes as user edits). Both needed for the SVG
+   *  tracked line ranges (change as user edits). Both needed for the SVG
    *  ribbon paths that connect flank-block-region → center-block-region. */
   function refreshArrows() {
     if (!centerView || !trackerField) return
     const tracked = centerView.state.field(trackerField)
-    const doc = centerView.state.doc
-    // Center position: convert doc char-offset → line number → pixel Y.
-    const centerYH = (from: number, to: number): [number, number] => {
-      const startLine = doc.lineAt(Math.min(from, doc.length)).number
-      if (from >= to) return [(startLine - 1) * ROW_H, 0]
-      const endLine = doc.lineAt(Math.min(to - 1, doc.length)).number
-      return [(startLine - 1) * ROW_H, (endLine - startLine + 1) * ROW_H]
-    }
+    // Center position: tracked line range → pixel Y. Same arithmetic as the
+    // flank slots — the tracker is already in lines.
+    const centerYH = (from: number, to: number): [number, number] =>
+      [(from - 1) * ROW_H, Math.max(0, to - from) * ROW_H]
     const slot = (from: number, to: number, src: BlockSource, cy: number, ch: number): ArrowSlot => ({
       y: ((from < to ? from : Math.max(1, from - 1)) - 1) * ROW_H,
       h: Math.max(0, to - from) * ROW_H,
@@ -438,24 +313,14 @@
 
   /** Apply flank content for block `idx` into center at its tracked position.
    *  No-op if center already contains that side's content (idempotent).
-   *  Position surgery lives in merge-surgery.ts (planTake) — extracted so the
-   *  separator-math cases are unit-testable without a CM6 EditorView in jsdom.
-   *  See merge-surgery.test.ts for the full round-trip invariant suite. */
-  function takeBlock(idx: number, side: 'ours' | 'theirs') {
+   *  Position surgery lives in merge-surgery.ts (planTake/planTakeBoth), the
+   *  transaction shape in takeSpec (module script) — both unit/property-
+   *  tested without a CM6 EditorView. */
+  function takeBlock(idx: number, side: 'ours' | 'theirs' | 'both') {
     if (!centerView || !trackerField) return
-    const tracked = centerView.state.field(trackerField)
-    const pos = tracked[idx]
-    if (!pos) return
-
-    const srcLines = side === 'ours' ? oursLines : theirsLines
-    const plan = planTake(centerView.state.doc, pos, side, srcLines, blocks[idx])
-    if (!plan) return  // idempotent (pos.source === side)
-
-    centerView.dispatch({
-      changes: plan.change,
-      effects: applyBlock.of({ idx, side, newFrom: plan.newTrack.from, newTo: plan.newTrack.to }),
-      scrollIntoView: true,
-    })
+    const spec = takeSpec(centerView.state, trackerField, blocks, oursLines, theirsLines, idx, side)
+    if (!spec) return  // idempotent (source === side) or takeBoth on a one-sided block
+    centerView.dispatch(spec)
     currentBlockIdx = idx
   }
 
@@ -463,7 +328,7 @@
    *  trackerField (remapped through all edits), not the static `blocks[]`. */
   function scrollToBlock(i: number) {
     if (!centerView || !trackerField || i < 0 || i >= blocks.length) return
-    const pos = centerView.state.field(trackerField)[i].from
+    const pos = blockCharRange(centerView.state.doc, centerView.state.field(trackerField)[i]).from
     centerView.dispatch({
       effects: EditorView.scrollIntoView(pos, { y: 'center' }),
     })
@@ -477,31 +342,19 @@
     scrollToBlock(((currentBlockIdx + delta) % n + n) % n)
   }
 
-  /** Apply one side to every block. Synchronous dispatches land within CM6
-   *  history's newGroupDelay (500ms) → typically one Cmd+Z undoes the batch.
-   *  Empty-source blocks included — "take ours" when ours has nothing means
-   *  delete center content there (planTake's srcEmpty branch), which is the
-   *  correct semantics for "give me everything from the ours side". */
+  /** Apply one side to every block as ONE transaction — one Cmd+Z undoes
+   *  the whole batch (takeAllSpec, module script). */
   function takeAll(side: 'ours' | 'theirs') {
-    for (let i = 0; i < blocks.length; i++) takeBlock(i, side)
+    if (!centerView || !trackerField) return
+    const spec = takeAllSpec(centerView.state, trackerField, blocks, oursLines, theirsLines, side)
+    if (spec) centerView.dispatch(spec)
   }
 
   /** Concatenate ours+theirs for the current block. For additive conflicts
    *  (dueling imports, new list entries) where you want BOTH changes. No-op
    *  if either side is empty (degenerates to regular take). */
   function takeBoth(idx: number) {
-    if (!centerView || !trackerField) return
-    const tracked = centerView.state.field(trackerField)
-    const pos = tracked[idx]
-    if (!pos) return
-    const plan = planTakeBoth(pos, oursLines, theirsLines, blocks[idx])
-    if (!plan) return  // idempotent or one side empty
-    centerView.dispatch({
-      changes: plan.change,
-      effects: applyBlock.of({ idx, side: 'both', newFrom: plan.newTrack.from, newTo: plan.newTrack.to }),
-      scrollIntoView: true,
-    })
-    currentBlockIdx = idx
+    takeBlock(idx, 'both')
   }
 
   function save() {

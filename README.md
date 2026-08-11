@@ -74,6 +74,8 @@ lightjj api GET /tab/0/api/agent   # the API contract — what an agent reads fi
 
 `lightjj skill install` teaches Claude Code (and any harness that scans `~/.claude/skills/`) about the API automatically. Without it, click the **Agent hint** button in doc-mode and paste the snippet into your agent. `lightjj skill` (no args) prints the SKILL.md to stdout so you can vendor it into a project's `.claude/skills/`.
 
+**Linkable changes** — `http://<addr>/?change=<id>` opens lightjj with that change (change or commit id, short prefixes OK) selected, widening the revset once if it isn't in view; `?revset=<expr>` sets the filter and `&path=<file>` scrolls the diff to a file. An agent can hand you such a link when it's done; the params are stripped after applying so a refresh returns to the plain URL.
+
 **Remote repos** — run on the remote and port-forward, or use SSH proxy mode:
 
 ```bash

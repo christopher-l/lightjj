@@ -269,6 +269,24 @@
     : undefined
   )
 
+  // "Before" side of the binary-image diff (DiffFileView → ImageDiff). Keyed
+  // on the PARENT commit_id, not `<commitId>-`: a snapshot/describe of @
+  // mints a new child id while the parent tree is unchanged, and the child-
+  // keyed revset would remount ImageDiff + refetch uncached for nothing.
+  // Merge commits have no single previous version — say so up front instead
+  // of letting a multi-rev `jj file show` 404. parentIds absent (older
+  // constructors) → the child-keyed revset so nothing regresses. Multi-check:
+  // parents of the range's roots, matching what the text diff compares
+  // against; a multi-root range 404s → ImageDiff drops the side gracefully.
+  let imageBase = $derived.by((): { rev?: string; note?: string } => {
+    if (!diffTarget) return {}
+    if (diffTarget.kind === 'multi') return { rev: `roots(${diffTarget.revset})-` }
+    const p = diffTarget.parentIds
+    if (!p) return { rev: `${diffTarget.commitId}-` }
+    if (p.length === 1) return { rev: p[0] }
+    return p.length > 1 ? { note: 'merge commit — no single previous version' } : {}
+  })
+
   // --- Diff line context menu ---
   function openDiffLineContextMenu(e: MouseEvent, info: DiffLineInfo): void {
     if (!oncontextmenu) return
@@ -1941,6 +1959,9 @@
             onpreview={previewCommitId && !hunkReview ? fileActions.togglePreview : undefined}
             previewContent={fileActions.previewContents.get(filePath)}
             previewRevision={diffTarget?.kind === 'single' ? diffTarget.changeId : previewCommitId}
+            imageRevision={previewCommitId}
+            imageBaseRevision={imageBase.rev}
+            imageBaseNote={imageBase.note}
             onmerge={canMutateFiles ? fileActions.startMerge : undefined}
             onresolveconflict={canMutateFiles ? fileActions.quickResolve : undefined}
             ondiscard={canMutateFiles ? fileActions.discardFile : undefined}
@@ -2431,5 +2452,8 @@
     font-size: var(--fs-md);
     font-weight: 600;
   }
+  /* Scoped `color: inherit` out-specifies theme.css's .close-btn:hover, so the
+     hover state is restated here (same as MessageBar's .dismiss). */
   .edit-error-dismiss { margin-left: auto; color: inherit; }
+  .edit-error-dismiss:hover { color: var(--text); }
 </style>

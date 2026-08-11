@@ -32,8 +32,9 @@ the doc-comment store, the navigate endpoint, and the review-comment store.
 lightjj api [flags] METHOD PATH [BODY]
 
   METHOD   GET | POST | PUT | DELETE | PATCH
-  PATH     verbatim — most routes are tab-scoped: /tab/{N}/api/...
-           Root-only: /tabs, /api/config. Tab 0 is the launch repo.
+  PATH     /tab/{N}/api/... (sent as written) or /api/... (aimed at the
+           tab whose repo contains your cwd). Root-only: /tabs, /api/config.
+           Tab 0 is the launch repo.
   BODY     literal JSON | @file | "-" for stdin
 ```
 
@@ -111,11 +112,41 @@ others won't-fix, and may post their own. Be a good participant:
    the next read. Use `/api/navigate` to *steer* the user; `/api/focus` to
    *read* where they are.
 
+## Linking to a change
+
+When you've made or found a change the user should look at, hand them a URL
+instead of (or as well as) steering with `navigate` — it works even if their
+browser tab is closed. Take the address from `lightjj sessions`:
+
+```text
+http://127.0.0.1:54321/?change=wqnwkozp
+http://127.0.0.1:54321/?change=wqnwkozp&path=src/main.go
+http://127.0.0.1:54321/?revset=trunk()..wqnwkozp             # a range / several changes
+http://127.0.0.1:54321/?change=wqnwkozp&revset=mine()         # filter, then select within it
+```
+
+- `change` — a change id or commit id; the short unique prefixes jj prints are
+  fine. If it isn't in the user's current view, lightjj widens the revset once
+  to `<id> | @ | trunk()` and selects it; if it still can't be found (or the
+  prefix is ambiguous) the previous view is restored and the user sees a
+  warning. Ids only — bookmarks, `@`, or expressions go in `revset`.
+- `revset` — replaces the revset filter, exactly as if typed. Keep it scoped
+  (`trunk()..x`, `mine()`, `ancestors(x, 20) | @`) — never `all()` on a large repo.
+- `path` — scroll that change's diff to a file.
+
+The params apply once to the launch repo (tab 0) and are then stripped from the
+address bar, so a refresh returns to the plain URL. URL-encode revsets that
+contain `&`, `+`, `#`, or spaces.
+
 ## Multiple sessions / repos
 
-Discovery matches the agent's cwd against each session's repo dir. If you're
-inside the same repo lightjj was launched in, `lightjj api ...` just works. If
-not:
+Discovery matches the agent's cwd against every open tab of each session (not
+just the launch repo). Inside any repo lightjj has open, `lightjj api ...`
+just works — and a tab-relative `/api/...` path is aimed at the matched tab
+for you (`/tab/2/api/log` if your cwd is tab 2's repo; stderr names the tab
+when it isn't tab 0). An explicit `/tab/N/...` is sent as written. A stderr
+`warning: ... one of them is stale` means the running server and this binary
+are different lightjj versions. If nothing matches:
 
 ```bash
 lightjj sessions                              # see what's running
@@ -133,7 +164,8 @@ but won't auto-match — its repo dir is a remote path. Use `--addr`.
 - Don't run `jj` commands directly when the user is reviewing in lightjj —
   the snapshot loop will pick up your changes and the user's view will jump.
   If you need to mutate, tell the user what you'd do and let them decide.
-- Don't open the browser URL or screenshot the UI.
+- Don't open the browser URL or screenshot the UI yourself (handing the user a
+  `?change=` link is fine — see "Linking to a change").
 - Don't guess endpoint shapes — `lightjj api GET /tab/0/api/agent` documents
   all of them with example payloads.
 
@@ -145,8 +177,9 @@ but won't auto-match — its repo dir is a remote path. Use `--addr`.
   `::1`, or `localhost`. SSH tunnels: forward to a local port, then `--addr 127.0.0.1:N`.
 - **`multiple lightjj sessions match`** — two instances on the same repo.
   `lightjj sessions`, then pick one with `--addr`.
-- **HTTP 200 but the body is HTML** — you forgot the `/tab/N/` prefix; the
-  unprefixed path falls through to the SPA. Use `/tab/0/api/...`.
+- **HTTP 200 but the body is HTML** — the path fell through to the SPA:
+  with `--addr` or raw `curl` nothing is auto-prefixed, so an unprefixed
+  `/api/...` needs an explicit `/tab/0/api/...`; otherwise check for a typo.
 - **HTTP 400 `Content-Type must be application/json`** — only happens with
   `curl`; `lightjj api` sets it automatically when a body is present.
 - **HTTP 400 `changeId required`** — `/api/annotations` uses camelCase query

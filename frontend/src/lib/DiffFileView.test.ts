@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/svelte'
 import DiffFileView from './DiffFileView.svelte'
-import type { DiffFile } from './diff-parser'
-import type { FileChange } from './api'
+import { parseDiffContent, type DiffFile } from './diff-parser'
+import { api, type FileChange } from './api'
 import { fromAnnotation, type PlacedReview, type Severity } from './review'
 import type { WordSpan } from './word-diff'
 
@@ -13,6 +13,7 @@ function makeFile(filePath: string, lines: { type: 'add' | 'remove' | 'context';
     hunks: lines.length > 0
       ? [{ header: '@@ -1 +1 @@', oldStart: 1, newStart: 1, newCount: 1, lines }]
       : [],
+    isBinary: false,
   }
 }
 
@@ -295,6 +296,7 @@ describe('DiffFileView', () => {
           { header: '@@ -1,3 +1,3 @@', oldStart: 1, newStart: 5, newCount: 3, lines: [{ type: 'context', content: ' a' }] },
           { header: '@@ -10,3 +10,3 @@', oldStart: 10, newStart: 15, newCount: 3, lines: [{ type: 'context', content: ' b' }] },
         ],
+        isBinary: false,
       }
       const { container } = render(DiffFileView, {
         props: defaultProps({ file, isExpanded: false }),
@@ -311,6 +313,7 @@ describe('DiffFileView', () => {
           { header: '@@ -1,3 +1,3 @@', oldStart: 1, newStart: 5, newCount: 3, lines: [{ type: 'context', content: ' a' }] },
           { header: '@@ -10,3 +10,3 @@', oldStart: 10, newStart: 15, newCount: 3, lines: [{ type: 'context', content: ' b' }] },
         ],
+        isBinary: false,
       }
       const { container } = render(DiffFileView, {
         props: defaultProps({ file, isExpanded: false, onexpand }),
@@ -608,6 +611,258 @@ describe('DiffFileView', () => {
       expect(calledWith).toContain(1)
       expect(calledWith).toContain(2)
       expect(calledWith).not.toContain(null)
+    })
+  })
+
+  describe('binary image diff', () => {
+    // jj `--tool :git` emits a git-style binary marker and no hunks; the
+    // parser sets isBinary. Path has a dir + space so URL-encoding is visible.
+    function binaryFile(filePath: string): DiffFile {
+      return {
+        header: `diff --git a/${filePath} b/${filePath}\nBinary files a/${filePath} and b/${filePath} differ`,
+        filePath,
+        hunks: [],
+        isBinary: true,
+      }
+    }
+    const IMG = 'assets/logo v2.png'
+    // api.fileRawUrl is the single URL builder (tab-scoped prefix included).
+    const rawUrl = (revision: string, path = IMG) => api.fileRawUrl(revision, path)
+    const imgSrcs = (c: HTMLElement) =>
+      Array.from(c.querySelectorAll('.image-diff img')).map(i => i.getAttribute('src'))
+
+    it('Modified in split view → Before (parent revset) and After images side by side', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M', additions: 0, deletions: 0 }),
+          splitView: true,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(container.querySelector('.binary-placeholder')).not.toBeInTheDocument()
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123-'), rawUrl('abc123')])
+      // `-` is URL-safe (stays literal); the path's `/` and space are encoded.
+      expect(imgSrcs(container)[0]).toMatch(/\/api\/file-raw\?revision=abc123-&path=assets%2Flogo\+v2\.png$/)
+      const labels = Array.from(container.querySelectorAll('.img-label')).map(l => l.textContent)
+      expect(labels).toEqual(['Before', 'After'])
+      expect(container.querySelector('input[type="range"]')).not.toBeInTheDocument()
+    })
+
+    it('Modified in unified view → swipe slider over both images', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          splitView: false,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123-'), rawUrl('abc123')])
+      expect(container.querySelector('.ic-stage')).toBeInTheDocument()
+      expect(container.querySelector('input[type="range"]')).toBeInTheDocument()
+    })
+
+    it('Added → only the After image, labelled Added', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'A' }),
+          splitView: true,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123')])
+      expect(container.querySelector('.img-label')?.textContent).toBe('Added')
+    })
+
+    it('Deleted → only the Before image from the parent, labelled Deleted', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'D' }),
+          splitView: true,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123-')])
+      expect(container.querySelector('.img-label')?.textContent).toBe('Deleted')
+    })
+
+    it('before image load error (merge parent) → drops to After-only with a note', async () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          splitView: true,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      const before = container.querySelector('.img-pane-before img')!
+      await fireEvent.error(before)
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123')])
+      expect(container.querySelector('.img-label')?.textContent).toBe('After')
+      expect(container.querySelector('.img-note')?.textContent).toContain('previous version unavailable')
+    })
+
+    it('multi-revision diff (no base) → After image only for Modified', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          splitView: false,
+          imageRevision: 'abc123',
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123')])
+      expect(container.querySelector('.img-label')?.textContent).toBe('After')
+      expect(container.querySelector('input[type="range"]')).not.toBeInTheDocument()
+    })
+
+    it('non-image binary → placeholder text, no images', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile('bin/tool.wasm'),
+          fileStats: makeStats('bin/tool.wasm', { type: 'M' }),
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(container.querySelector('.binary-placeholder')?.textContent).toContain('Binary file')
+      expect(container.querySelector('.image-diff')).not.toBeInTheDocument()
+    })
+
+    it('no imageRevision (and no base) → placeholder', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+        }),
+      })
+      expect(container.querySelector('.binary-placeholder')).toBeInTheDocument()
+      expect(container.querySelector('.image-diff img')).not.toBeInTheDocument()
+    })
+
+    it('collapsed binary image renders no body at all', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          isCollapsed: true,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      expect(container.querySelector('.image-diff')).not.toBeInTheDocument()
+      expect(container.querySelector('.binary-placeholder')).not.toBeInTheDocument()
+    })
+
+    it('hides Preview (auto view supersedes it) and Edit (text editor) for binary files', () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          onpreview: vi.fn(),
+          onedit: vi.fn(),
+          onfilehistory: vi.fn(),
+          imageRevision: 'abc123',
+          imageBaseRevision: 'abc123-',
+        }),
+      })
+      const btns = Array.from(container.querySelectorAll('.diff-file-header .btn')).map(b => b.textContent)
+      expect(btns).not.toContain('Preview')
+      expect(btns).not.toContain('Edit')
+      expect(btns).toContain('History')
+    })
+
+    it('pure rename: real `jj diff --git` shape (rename from/to, NO Binary line) → image body via sourcePath, no Edit/Preview', () => {
+      // What the parser actually produces for a pure-renamed PNG: isBinary
+      // stays false (no "Binary files … differ" marker), hunks [], sourcePath
+      // from `rename from`. Rename-with-content-change decomposes to D+A.
+      const [file] = parseDiffContent(
+        'diff --git a/img/old.png b/img/new.png\nrename from img/old.png\nrename to img/new.png\n')
+      expect(file.isBinary).toBe(false)
+      expect(file.sourcePath).toBe('img/old.png')
+      expect(file.hunks).toEqual([])
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file,
+          fileStats: makeStats('img/new.png', { type: 'R', additions: 0, deletions: 0 }),
+          splitView: true,
+          onedit: vi.fn(),
+          onpreview: vi.fn(),
+          imageRevision: 'abc123',
+          imageBaseRevision: 'ppp999',
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('ppp999', 'img/old.png'), rawUrl('abc123', 'img/new.png')])
+      const btns = Array.from(container.querySelectorAll('.diff-file-header .btn')).map(b => b.textContent)
+      expect(btns).not.toContain('Edit')
+      expect(btns).not.toContain('Preview')
+      expect(container.querySelector('.binary-placeholder')).not.toBeInTheDocument()
+    })
+
+    it('fileStats not yet loaded → no <img> requested and no placeholder flash', () => {
+      // diff and file-list load independently; guessing both sides in the
+      // undefined window would fire a doomed parent fetch for an Added image.
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: undefined,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'ppp999',
+        }),
+      })
+      expect(container.querySelector('img')).not.toBeInTheDocument()
+      expect(container.querySelector('.binary-placeholder')).not.toBeInTheDocument()
+    })
+
+    it('merge commit (no base, baseNote) → After only + up-front note; Added gets no note', () => {
+      const note = 'merge commit — no single previous version'
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          imageRevision: 'abc123',
+          imageBaseNote: note,
+        }),
+      })
+      expect(imgSrcs(container)).toEqual([rawUrl('abc123')])
+      expect(container.querySelector('.img-label')?.textContent).toBe('After')
+      expect(container.querySelector('.img-note')?.textContent).toBe(`(${note})`)
+
+      const added = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'A' }),
+          imageRevision: 'abc123',
+          imageBaseNote: note,
+        }),
+      })
+      expect(added.container.querySelector('.img-label')?.textContent).toBe('Added')
+      expect(added.container.querySelector('.img-note')).not.toBeInTheDocument()
+    })
+
+    it('range slider blurs on pointer release so global j/k keys are not swallowed', async () => {
+      const { container } = render(DiffFileView, {
+        props: defaultProps({
+          file: binaryFile(IMG),
+          fileStats: makeStats(IMG, { type: 'M' }),
+          splitView: false,
+          imageRevision: 'abc123',
+          imageBaseRevision: 'ppp999',
+        }),
+      })
+      const range = container.querySelector<HTMLInputElement>('input[type="range"]')!
+      range.focus()
+      expect(document.activeElement).toBe(range)
+      await fireEvent.pointerUp(range)
+      expect(document.activeElement).not.toBe(range)
     })
   })
 })

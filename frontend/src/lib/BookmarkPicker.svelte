@@ -55,6 +55,12 @@
   // `filtered` from the default-sort branch to the fuzzy-filter branch,
   // collapsing the list to items matching the first selection's name.
   // submit() reads filtered[cursor.index] first, so the highlight is enough.
+  // Hover is the PANEL pattern (separate, dimmer `.hovered` — JS-tracked via
+  // delegated mousemove over [data-idx], never a :hover rule), NOT
+  // hoverMovesCursor: index -1 is semantic here ("Enter submits the raw
+  // text" / "empty → no-op"), so a mouse grazing a row must never change what
+  // Enter does — that would turn a typed revset prefix into a bookmark pick,
+  // or an empty-input Enter into a mutation. Click still picks the row.
   const cursor = createListCursor({
     count: () => filtered.length,
     initialIndex: -1,
@@ -111,11 +117,15 @@
     {#if error && showError}
       <div class="bm-set-error">⚠ {error}</div>
     {:else if filtered.length > 0}
-      <div class="bm-set-suggestions">
+      <!-- svelte-ignore a11y_no_static_element_interactions -- container only
+           delegates hover tracking; the buttons inside are the interactive bits -->
+      <div class="bm-set-suggestions" onmousemove={cursor.onRowsMouseMove} onmouseleave={cursor.onRowsMouseLeave}>
         {#each filtered as bm, i (bm.name)}
           <button
             class="bm-set-suggestion"
             class:active={i === cursor.index}
+            class:hovered={i === cursor.hovered && i !== cursor.index}
+            data-idx={i}
             onmousedown={(e: MouseEvent) => { e.preventDefault(); value = bm.name; submit() }}
           >
             {@render row(bm)}
@@ -184,7 +194,11 @@
     cursor: pointer;
   }
 
-  .bm-set-suggestion:hover,
+  /* No :hover rule — JS-tracked .hovered (dimmer, pointer affordance only)
+     vs .active (the keyboard cursor = what Enter submits). */
+  .bm-set-suggestion.hovered {
+    background: color-mix(in srgb, var(--surface0) 50%, transparent);
+  }
   .bm-set-suggestion.active {
     background: var(--surface0);
   }

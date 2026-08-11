@@ -18,17 +18,21 @@ lightjj api GET /tab/0/api/log
 ```
 
 - **METHOD** — `GET | POST | PUT | DELETE | PATCH` (case-insensitive).
-- **PATH** — verbatim URL path including any query string and the `/tab/{N}`
-  prefix. Nothing is auto-prefixed.
+- **PATH** — URL path including any query string. A tab-relative `/api/...`
+  path is aimed at the tab whose repo contains your cwd (`/tab/2/api/log` if
+  your cwd is tab 2's repo; stderr names the tab when it isn't tab 0). An
+  explicit `/tab/{N}/...` path is sent as written.
 - **BODY** — optional. A literal JSON string, `@file` to read from a file, or
   `-` to read from stdin. Sets `Content-Type: application/json` automatically.
 - **`--addr host:port`** — bypass discovery. Use for SSH-tunnel endpoints or
   to disambiguate when several lightjj instances are running. Loopback only.
 - **`--repo path`** — match a different repo than the cwd (discovery normally
-  matches your cwd against each session's repo dir).
+  matches your cwd against every open tab's repo dir in each session).
 - **`-H "Key: Value"`** — extra request header (repeatable).
-- **`lightjj sessions`** — lists running instances (PID, addr, mode, repo) so
-  you can pick an `--addr`.
+- **`lightjj sessions`** — lists running instances (PID, addr, mode, version,
+  repo, open tabs) so you can pick an `--addr`. A stderr `warning: ... one of
+  them is stale` on `lightjj api` means the running server and this binary
+  are different lightjj versions.
 
 The response body always goes to **stdout** — even on 4xx/5xx, so it can be
 piped to `jq`. Status and discovery errors go to **stderr**. Exit codes:
@@ -47,10 +51,12 @@ lightjj api GET '/tab/0/api/file-show?revision=@&path=docs/DESIGN.md'
 `GET /tabs` lists open tabs with their paths if you need a different one.
 `GET <base>/api/capabilities` returns `{api_version, jj_version, actions:
 [...]}` so you can probe for endpoint availability instead of 404-handling.
-The only root-mounted routes are `GET|POST /tabs`, `DELETE /tabs/{id}`, and
-`GET|POST /api/config` (and `/api/config/raw`). An unprefixed `/api/...` path
-falls through to the SPA catch-all and returns **HTML, not a 404** — if you
-get HTML back, you forgot the `/tab/{N}/` prefix.
+The only root-mounted routes are `GET|POST /tabs`, `DELETE /tabs/{id}`,
+`GET|POST /api/config` (and `/api/config/raw`), and
+`GET|POST /api/state/recent-actions`. Over raw HTTP (curl), an
+unprefixed `/api/...` path falls through to the SPA catch-all and returns
+**HTML, not a 404** — if you get HTML back, you forgot the `/tab/{N}/` prefix.
+(`lightjj api` adds the prefix for you.)
 
 lightjj only accepts requests with `Host: localhost` (DNS-rebinding
 protection). If running on a different machine, use an SSH tunnel that keeps
@@ -67,7 +73,7 @@ lightjj api --addr localhost:8080 GET /tab/0/api/log
 
 If the `lightjj` binary isn't available in your sandbox, discover the server
 address from the session file directly. A running lightjj writes
-`{pid, addr, port, repo_dir, mode, started_at}` to
+`{pid, addr, port, repo_dir, mode, started_at, version, tabs: [{id, path}]}` to
 `$XDG_RUNTIME_DIR/lightjj/sessions/<pid>.json` (or
 `$TMPDIR/lightjj-<uid>/sessions/<pid>.json` where `$XDG_RUNTIME_DIR` is unset
 — macOS, most servers). To find the instance for the repo you're working in:
@@ -76,8 +82,9 @@ address from the session file directly. A running lightjj writes
 dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}/lightjj-$(id -u)}"
 [ -n "$XDG_RUNTIME_DIR" ] && dir="$dir/lightjj"
 [ -O "$dir/sessions" ] || exit 1   # refuse a dir you don't own
-jq -r --arg repo "$PWD" 'select(.repo_dir == $repo) | .addr' "$dir"/sessions/*.json
-# → 127.0.0.1:54321
+jq -r --arg repo "$PWD" \
+  'select(.repo_dir == $repo or any(.tabs[]?; .path == $repo)) | .addr' "$dir"/sessions/*.json
+# → 127.0.0.1:54321   (the matching .tabs[].id is your /tab/{N}/ prefix)
 ```
 
 On a shared `/tmp`, verify you own the directory before trusting `addr` —
@@ -305,6 +312,25 @@ The server passes `comment_id` through unchanged — the frontend resolves it
 against its loaded comment stores and scrolls to that thread. If the id isn't
 loaded in the user's current view, nothing happens. Combine with `change_id`
 or `file_path` if you want a fallback scroll target.
+
+### Link to a change (no live push needed)
+
+`navigate` needs a connected browser. To report a result the user can open
+later, hand them a URL on the server root (host:port from `lightjj sessions`;
+these are browser query params, not an API route):
+
+```
+http://127.0.0.1:54321/?change=wqnwkozp[&path=src/handlers.go][&revset=trunk()..wqnwkozp]
+```
+
+`change` is a change id or commit id — full or a unique short prefix — and is
+selected without touching the user's revset when it's already in view;
+otherwise the frontend widens the revset once to `<id> | @ | trunk()` and
+retries; if it's still missing (or the prefix is ambiguous) the previous
+revset is restored and the user sees a warning. `revset` alone replaces the filter (use
+it for ranges / several changes; keep it scoped, never `all()`). `path` scrolls
+the selected change's diff to that file. The params apply once to tab 0 and are
+then stripped from the address bar. URL-encode revsets containing `&`/`+`/`#`.
 
 ## Read the user's current view
 

@@ -50,7 +50,9 @@
     {#if message.action}
       <button class="action-btn" onclick={message.action.onClick}>{message.action.label}</button>
     {:else}
-      <button class="dismiss" onclick={onDismiss} aria-label="Dismiss">✕</button>
+      <!-- `dismiss` is kept alongside the shared .close-btn: e2e/bombadil/spec.ts
+           (clickDismiss) targets it. -->
+      <button class="close-btn dismiss" onclick={onDismiss} aria-label="Dismiss">✕</button>
     {/if}
   </div>
   {#if expanded && message.details}
@@ -129,9 +131,8 @@
     background: color-mix(in srgb, var(--msg-fg) 15%, transparent);
   }
 
-  .action-btn,
-  .dismiss {
-    background: transparent;
+  .action-btn {
+    background: color-mix(in srgb, var(--msg-fg) 10%, transparent);
     border: 1px solid var(--msg-fg);
     color: var(--msg-fg);
     padding: 2px 8px;
@@ -139,17 +140,24 @@
     cursor: pointer;
     font-family: inherit;
     font-size: var(--fs-sm);
-  }
-
-  .action-btn {
     font-weight: 600;
-    background: color-mix(in srgb, var(--msg-fg) 10%, transparent);
   }
 
-  .action-btn:hover,
-  .dismiss:hover {
+  .action-btn:hover {
     background: color-mix(in srgb, var(--msg-fg) 20%, transparent);
   }
+
+  /* Shared .close-btn, tinted to the bar's kind color (same as DiffPanel's
+     .edit-error-dismiss). Padding keeps the old bordered button's hit-area —
+     dismiss is this overlay's primary interaction. */
+  .dismiss {
+    color: inherit;
+    padding: 2px 8px;
+  }
+  /* Restated: the scoped `color: inherit` above ties theme.css's
+     .close-btn:hover on specificity and wins on source order, which would
+     otherwise leave hover with no feedback. */
+  .dismiss:hover { color: var(--text); }
 
   .message-details {
     border-bottom: 1px solid color-mix(in srgb, var(--msg-fg) 30%, transparent);

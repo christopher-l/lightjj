@@ -10,13 +10,25 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+
+	"github.com/chronologos/lightjj/internal/api"
 )
 
 // Runtime session metadata for agent discovery. Written after net.Listen binds
 // so agents can find a running lightjj by repo path instead of port. The
 // localhost-only middleware (main.go localhostOnly) is the security boundary;
 // this file just makes the port discoverable to local processes.
+
+// sessionTab is one open tab of a running instance: its route id (the N in
+// /tab/{N}/api/...) and canonical workspace root. In --remote mode Path is a
+// remote path — harmless, discovery drops the whole session on Mode != "local"
+// before any path is matched, and `lightjj sessions` still gets to show it.
+type sessionTab struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
 
 type sessionInfo struct {
 	PID       int    `json:"pid"`
@@ -25,6 +37,14 @@ type sessionInfo struct {
 	RepoDir   string `json:"repo_dir"` // resolved local path, or remote path in --remote mode
 	Mode      string `json:"mode"`     // "local" or "ssh"
 	StartedAt int64  `json:"started_at"`
+	// Version is the writing binary's resolvedVersion(). `lightjj api` warns
+	// when it differs from its own — the stale-go:embed-binary bug class.
+	// Empty when the file predates the field (no warning).
+	Version string `json:"version,omitempty"`
+	// Tabs lists every open tab, tab 0 (== RepoDir) included, rewritten on
+	// tab open/close. Empty/absent in files from older binaries — discovery
+	// then falls back to RepoDir and treats the match as tab 0.
+	Tabs []sessionTab `json:"tabs"`
 }
 
 // resolveSessionPaths computes the session base+dir paths and whether ownership
@@ -108,9 +128,10 @@ func sessionDirReadOnly() (string, error) {
 }
 
 // maxSessionFileSize caps how much of a session JSON file readSessions will
-// parse. Legitimate files are ~150 bytes; an oversized file is corruption or a
-// planted DoS.
-const maxSessionFileSize = 4096
+// parse. Legitimate files are ~200 bytes + ~100 per open tab; 64 KiB leaves
+// room for hundreds of tabs while an oversized file is still rejected as
+// corruption or a planted DoS.
+const maxSessionFileSize = 64 << 10
 
 // readSessions reads and parses all <pid>.json files in dir. Skips files that
 // are oversized (> maxSessionFileSize), unparseable, or schema-invalid (no PID).
@@ -160,6 +181,9 @@ func readSessions(dir string) ([]sessionInfo, error) {
 		}
 		if s.PID <= 0 || s.Addr == "" {
 			continue // schema-invalid
+		}
+		if s.Tabs == nil {
+			s.Tabs = []sessionTab{} // older writer — serialize as [] not null
 		}
 		out = append(out, s)
 	}
@@ -217,6 +241,11 @@ func sweepStaleSessions(dir string) {
 // Sweeps stale entries first so crashes don't accumulate. Non-fatal on error —
 // agent discovery is best-effort; the server still works.
 //
+// The write is atomic (temp file in the same dir + rename): the file is
+// rewritten on every tab open/close while `lightjj api` may be reading it, and
+// a torn read would parse as garbage → "no session". os.CreateTemp creates
+// 0600; the temp name doesn't end in .json so readSessions/sweep ignore it.
+//
 // No-op on Windows: os.Getuid()==-1, fileStat.Mode() synthesizes 0777 (so the
 // 0o077 check is a wall not a gate), and Signal(0) is unsupported (sweep would
 // delete live siblings). release.yml ships darwin/linux only.
@@ -229,10 +258,87 @@ func writeSessionFile(info sessionInfo) string {
 		return ""
 	}
 	sweepStaleSessions(dir)
-	path := filepath.Join(dir, fmt.Sprintf("%d.json", info.PID))
+	name := fmt.Sprintf("%d.json", info.PID)
+	path := filepath.Join(dir, name)
+	if info.Tabs == nil {
+		info.Tabs = []sessionTab{}
+	}
 	js, _ := json.Marshal(info)
-	if err := os.WriteFile(path, js, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, name+".*.tmp")
+	if err != nil {
+		return ""
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op after a successful rename
+	if _, err := tmp.Write(js); err != nil {
+		tmp.Close()
+		return ""
+	}
+	if err := tmp.Close(); err != nil {
+		return ""
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return ""
 	}
 	return path
+}
+
+// sessionWriter owns one process's session file across its lifetime: the
+// fixed identity fields (pid/addr/version/…) are captured once, Update
+// rewrites the file with a fresh tab list, Remove deletes it at shutdown.
+// Tab open/close arrive on concurrent HTTP handler goroutines, so mu
+// serializes fetch-tabs + write as one step — the snapshot is taken INSIDE the
+// lock (tabs is a func, not a value) so the last write always reflects the
+// latest tab set rather than whichever goroutine happened to rename last.
+type sessionWriter struct {
+	mu      sync.Mutex
+	base    sessionInfo
+	tabs    func() []sessionTab
+	path    string // last successfully written path; "" until first success
+	removed bool   // Remove() ran — later Updates are no-ops (shutdown latch)
+}
+
+func newSessionWriter(base sessionInfo, tabs func() []sessionTab) *sessionWriter {
+	return &sessionWriter{base: base, tabs: tabs}
+}
+
+// Update rewrites the session file with the current tab list. Best-effort:
+// a failed write keeps the previous file (atomic rename) and its path. A
+// no-op after Remove: a tab open/close handler that released the manager
+// lock just before the shutdown signal would otherwise re-create the file
+// for a pid that is about to exit (leaked session → discovery hits a dead or
+// recycled pid).
+func (w *sessionWriter) Update() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.removed {
+		return
+	}
+	info := w.base
+	if w.tabs != nil {
+		info.Tabs = w.tabs()
+	}
+	if p := writeSessionFile(info); p != "" {
+		w.path = p
+	}
+}
+
+// sessionTabsOf adapts TabManager's out-of-package snapshot to the wire type.
+func sessionTabsOf(refs []api.TabRef) []sessionTab {
+	out := make([]sessionTab, len(refs))
+	for i, r := range refs {
+		out[i] = sessionTab{ID: r.ID, Path: r.Path}
+	}
+	return out
+}
+
+// Remove deletes the session file (shutdown) and latches the writer so a
+// racing Update can't resurrect it. Harmless if never written.
+func (w *sessionWriter) Remove() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.removed = true
+	if w.path != "" {
+		_ = os.Remove(w.path)
+	}
 }

@@ -71,22 +71,67 @@ func containsPath(resolvedRepoDir, resolvedCwd string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// candidate pairs a session with its resolved RepoDir (for sorting and tie
-// detection).
+// candidate pairs a session with the tab whose path matched and that path's
+// resolved form (for sorting and tie detection).
 type candidate struct {
 	sess     sessionInfo
+	tab      sessionTab
 	resolved string
 }
 
-// discoverSession finds the most-specific running local lightjj instance whose
-// RepoDir contains repoPath. Implements the 7-step discovery algorithm in
-// docs/design-notes/api-cli.md. dir is taken as a parameter (not resolved
-// internally) so tests can pass t.TempDir().
-func discoverSession(dir, repoPath string) (sessionInfo, error) {
+// resolveCandidatePath applies the per-path discovery filters to one session
+// path (RepoDir or a tab path): pre-filter "/"/relative/empty BEFORE any
+// resolution ("/" would universally match any cwd; a single-component path
+// like "/Users" is one level less universal and is NOT rejected — it's
+// constrained by the dir trust boundary and "longest path wins" prefers any
+// real session over it), EvalSymlinks (skip on failure — deleted dir), then
+// re-check the RESOLVED path != "/" (a symlink-to-root slips past the
+// pre-filter, which sees the unresolved string). ok=false → skip this path.
+func resolveCandidatePath(p string) (resolved string, ok bool) {
+	cleaned := filepath.Clean(p)
+	if cleaned == "" || cleaned == "/" || !filepath.IsAbs(cleaned) {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil || filepath.Clean(resolved) == "/" {
+		return "", false
+	}
+	return resolved, true
+}
+
+// candidateTabs lists the paths a session can be matched by. Files from
+// binaries that write `tabs` are matched by tab (tab 0 == RepoDir is in the
+// list); older files carry only RepoDir, which IS tab 0 on every version that
+// writes session files — so it's synthesized as {ID:"0"} and the caller
+// needn't special-case the old format. Tab ids are embedded into the request
+// path later, so a non-numeric id (corruption/plant) drops the tab here.
+func candidateTabs(s sessionInfo) []sessionTab {
+	if len(s.Tabs) == 0 {
+		return []sessionTab{{ID: "0", Path: s.RepoDir}}
+	}
+	out := make([]sessionTab, 0, len(s.Tabs))
+	for _, t := range s.Tabs {
+		if n, err := strconv.Atoi(t.ID); err != nil || n < 0 || strconv.Itoa(n) != t.ID {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// discoverSession finds the most-specific running local lightjj instance with
+// an open tab whose path contains repoPath, and returns that session plus the
+// matched tab. Implements the 7-step discovery algorithm in
+// docs/design-notes/api-cli.md, applied per tab path (RepoDir for pre-tabs
+// session files). Within one session the deepest matching tab wins (nested
+// repos open as two tabs); across sessions the deepest match wins and a tie
+// is an error. dir is taken as a parameter (not resolved internally) so tests
+// can pass t.TempDir().
+func discoverSession(dir, repoPath string) (sessionInfo, sessionTab, error) {
 	// Step 1: read + size-cap + schema filter.
 	sessions, err := readSessions(dir)
 	if err != nil {
-		return sessionInfo{}, fmt.Errorf("reading sessions: %w", err)
+		return sessionInfo{}, sessionTab{}, fmt.Errorf("reading sessions: %w", err)
 	}
 
 	// Resolve repoPath once. Abs FIRST, then EvalSymlinks — EvalSymlinks of a
@@ -103,22 +148,17 @@ func discoverSession(dir, repoPath string) (sessionInfo, error) {
 		// cwd deleted or perms — fall back to the unresolved absolute path.
 		resolvedCwd = repoPath
 		if !filepath.IsAbs(resolvedCwd) {
-			return sessionInfo{}, errors.New("cannot determine working directory")
+			return sessionInfo{}, sessionTab{}, errors.New("cannot determine working directory")
 		}
 	}
 
 	var alive []sessionInfo // for the zero-match error message (incl. SSH)
-	var matches []candidate
+	var matches []candidate // at most one per session: its deepest matching tab
 
 	for _, s := range sessions {
-		// Step 1 (continued): pre-filter RepoDir before any resolution.
-		// "/" is rejected because it would universally match any cwd. A
-		// single-component path like "/Users" or "/home" is one level less
-		// universal and is NOT rejected — it's constrained by the dir trust
-		// boundary (planted entries require same-uid + a verified-owned dir),
-		// and "longest RepoDir wins" prefers any real session over it.
-		cleaned := filepath.Clean(s.RepoDir)
-		if cleaned == "" || cleaned == "/" || !filepath.IsAbs(cleaned) {
+		// Step 1 (continued): a session whose own RepoDir is "/"/relative/
+		// empty is corrupt or planted — drop it wholesale, tabs and all.
+		if cleaned := filepath.Clean(s.RepoDir); cleaned == "" || cleaned == "/" || !filepath.IsAbs(cleaned) {
 			continue
 		}
 		// Step 2: filter dead pids — freshness, not trust (Security §3).
@@ -126,9 +166,10 @@ func discoverSession(dir, repoPath string) (sessionInfo, error) {
 			continue
 		}
 		alive = append(alive, s)
-		// Step 3: filter Mode == "local". An SSH-mode RepoDir holds the
-		// *remote* path; if it coincidentally exists locally, a containment
-		// match would route the agent's writes to the wrong machine's repo.
+		// Step 3: filter Mode == "local". An SSH-mode session holds *remote*
+		// paths (RepoDir and every tab); if one coincidentally exists locally,
+		// a containment match would route the agent's writes to the wrong
+		// machine's repo. Dropped before any path is looked at.
 		if s.Mode != "local" {
 			continue
 		}
@@ -136,21 +177,22 @@ func discoverSession(dir, repoPath string) (sessionInfo, error) {
 		if _, _, err := validateAddr(s.Addr); err != nil {
 			continue
 		}
-		// Step 5: containment match. Resolve the candidate's RepoDir; skip on
-		// failure (deleted dir).
-		resolvedRepo, err := filepath.EvalSymlinks(cleaned)
-		if err != nil {
-			continue
+		// Step 5: containment match, per tab path. Keep this session's
+		// deepest matching tab — nested repos (cwd inside both /a and /a/b,
+		// each open as a tab) must target the inner one.
+		var best *candidate
+		for _, tab := range candidateTabs(s) {
+			resolved, ok := resolveCandidatePath(tab.Path)
+			if !ok || !containsPath(resolved, resolvedCwd) {
+				continue
+			}
+			if best == nil || len(resolved) > len(best.resolved) {
+				best = &candidate{sess: s, tab: tab, resolved: resolved}
+			}
 		}
-		// Re-check resolved RepoDir != "/" — a symlink-to-root would slip past
-		// the pre-filter (which sees the unresolved string).
-		if filepath.Clean(resolvedRepo) == "/" {
-			continue
+		if best != nil {
+			matches = append(matches, *best)
 		}
-		if !containsPath(resolvedRepo, resolvedCwd) {
-			continue
-		}
-		matches = append(matches, candidate{sess: s, resolved: resolvedRepo})
 	}
 
 	// Step 7: zero matches.
@@ -161,21 +203,26 @@ func discoverSession(dir, repoPath string) (sessionInfo, error) {
 			b.WriteString("\nrunning sessions:")
 			for _, s := range alive {
 				fmt.Fprintf(&b, "\n  pid %d  %s  %s  %s", s.PID, s.Addr, s.Mode, s.RepoDir)
+				for _, tab := range s.Tabs {
+					if tab.ID != "0" {
+						fmt.Fprintf(&b, "\n    tab %s  %s", tab.ID, tab.Path)
+					}
+				}
 			}
 		}
 		b.WriteString("\nuse --repo to match a different path, --addr to bypass discovery, or start lightjj in the repo")
-		return sessionInfo{}, errors.New(b.String())
+		return sessionInfo{}, sessionTab{}, errors.New(b.String())
 	}
 
-	// Step 6: most-specific (deepest) RepoDir wins. Among matches all RepoDirs
-	// are ancestors of repoPath and therefore prefixes of one another, so byte
+	// Step 6: most-specific (deepest) path wins. Among matches all paths are
+	// ancestors of repoPath and therefore prefixes of one another, so byte
 	// length agrees with component depth on the winner.
 	sort.SliceStable(matches, func(i, j int) bool {
 		return len(matches[i].resolved) > len(matches[j].resolved)
 	})
 	best := matches[0]
 	// Sorted longest-first: a tie can only be matches[1] sharing matches[0]'s
-	// resolved RepoDir (two lightjj instances on the same repo). Don't
+	// resolved path (two lightjj instances with the same repo open). Don't
 	// auto-pick — a stale instance could shadow a fresh one.
 	if len(matches) > 1 && matches[1].resolved == best.resolved {
 		var b strings.Builder
@@ -184,11 +231,80 @@ func discoverSession(dir, repoPath string) (sessionInfo, error) {
 			if c.resolved != best.resolved {
 				break
 			}
-			fmt.Fprintf(&b, "\n  pid %d  %s  started %s", c.sess.PID, c.sess.Addr, time.UnixMilli(c.sess.StartedAt).Format(time.RFC3339))
+			fmt.Fprintf(&b, "\n  pid %d  %s  tab %s  started %s", c.sess.PID, c.sess.Addr, c.tab.ID, time.UnixMilli(c.sess.StartedAt).Format(time.RFC3339))
 		}
-		return sessionInfo{}, errors.New(b.String())
+		return sessionInfo{}, sessionTab{}, errors.New(b.String())
 	}
-	return best.sess, nil
+	return best.sess, best.tab, nil
+}
+
+// resolveTabPath applies the discovered tab to a caller-supplied request
+// path. A path of exactly "/api" or starting with "/api/" is tab-relative and
+// gets the matched tab's "/tab/{id}" prefix (every root-mounted /api/* route
+// — config, state — is also mounted per tab, so this never breaks a working
+// path; it also retires the unprefixed-/api-returns-SPA-HTML footgun). An
+// explicit "/tab/N/..." or any other path is left verbatim — the caller chose.
+func resolveTabPath(path string, tab sessionTab) string {
+	if tab.ID == "" {
+		return path
+	}
+	if path == "/api" || strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/api?") {
+		return "/tab/" + tab.ID + path
+	}
+	return path
+}
+
+// explicitTabID extracts N from a "/tab/N/..." path ("" if not that shape).
+func explicitTabID(path string) string {
+	rest, ok := strings.CutPrefix(path, "/tab/")
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, "/")
+	id, _, _ = strings.Cut(id, "?")
+	return id
+}
+
+// versionMismatchWarning returns the one-line stderr warning for a session
+// written by a different lightjj version than this binary (the stale
+// go:embed-binary bug class), or "" when they match or the session predates
+// the version stamp.
+func versionMismatchWarning(sess sessionInfo, self string) string {
+	a, b := releaseCore(sess.Version), releaseCore(self)
+	if a == "" || b == "" || a == b {
+		return ""
+	}
+	return fmt.Sprintf("lightjj api: warning: session pid %d runs lightjj %s but this binary is %s — one of them is stale", sess.PID, sess.Version, self)
+}
+
+// releaseCore reduces a version string to its comparable X.Y.Z release core,
+// or "" for anything that isn't a release build (dev / go-run "(devel)" /
+// VCS pseudo-versions like 1.36.2-0.2026...-abc123). Only release-number
+// differences indicate the stale-embedded-binary class; `+dirty` metadata,
+// pre-release suffixes, and dev builds (the maintainer's two-terminal
+// go-run-server + built-CLI loop) must not warn on every call.
+func releaseCore(v string) string {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		if strings.HasPrefix(v[i:], "-0.") { // Go pseudo-version → not a release
+			return ""
+		}
+		v = v[:i]
+	}
+	for _, part := range strings.Split(v, ".") {
+		if part == "" {
+			return ""
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return ""
+			}
+		}
+	}
+	if strings.Count(v, ".") != 2 {
+		return ""
+	}
+	return v
 }
 
 // doAPIRequest builds and sends an HTTP request to a validated loopback
@@ -242,12 +358,15 @@ func doAPIRequest(addr, method, path string, body io.Reader, extraHeaders []stri
 const apiUsage = `usage: lightjj api [flags] METHOD PATH [BODY]
 
   METHOD   GET | POST | PUT | DELETE | PATCH (case-insensitive, uppercased)
-  PATH     verbatim URL path, including query string. Not auto-prefixed —
-           tab-scoped routes are /tab/{N}/api/...
+  PATH     URL path, including query string. Tab-scoped routes are
+           /tab/{N}/api/...; a tab-relative /api/... is prefixed with the
+           tab discovery matched for your cwd (any open tab, not just the
+           launch repo). An explicit /tab/N/... is sent verbatim.
   BODY     literal JSON | @file (path relative to CWD) | "-" for stdin.
 
 flags:
-  --addr   host:port — bypass discovery entirely. Loopback only.
+  --addr   host:port — bypass discovery entirely (PATH sent verbatim —
+           spell out /tab/N/). Loopback only.
   --repo   path — match a different repo than cwd
   -H       "Key: Value" — extra header (repeatable)
 
@@ -280,6 +399,13 @@ func runAPISubcommand(args []string) int {
 	}
 	method := strings.ToUpper(pos[0])
 	path := pos[1]
+	// Exactly one leading slash: "api/log" would skip the tab rewrite yet still
+	// be sent as /api/log (SPA HTML, no hint); "//api/log" parses as an
+	// authority and mangles the path.
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		fmt.Fprintf(os.Stderr, "lightjj api: PATH must start with a single '/' (got %q) — e.g. /api/log\n", path)
+		return 2
+	}
 
 	// Resolve the target address: explicit --addr bypasses discovery entirely.
 	var addr string
@@ -287,6 +413,9 @@ func runAPISubcommand(args []string) int {
 		if _, _, err := validateAddr(*addrFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "lightjj api: %v\n", err)
 			return 2
+		}
+		if *repoFlag != "" {
+			fmt.Fprintln(os.Stderr, "lightjj api: note: --addr bypasses discovery, so --repo (and /api tab auto-prefixing) is ignored")
 		}
 		addr = *addrFlag
 	} else {
@@ -307,12 +436,28 @@ func runAPISubcommand(args []string) int {
 				return 1
 			}
 		}
-		sess, err := discoverSession(dir, repoPath)
+		sess, tab, err := discoverSession(dir, repoPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lightjj api: %v\n", err)
 			return 1
 		}
 		addr = sess.Addr
+		if w := versionMismatchWarning(sess, resolvedVersion()); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
+		// Target the matched tab: tab-relative /api/... paths get its prefix;
+		// an explicit /tab/N/ is honoured. Silent for the launch tab (the
+		// common case); a non-launch match is announced so an agent copying
+		// /tab/0/ examples from the docs notices it is reading the wrong repo.
+		resolved := resolveTabPath(path, tab)
+		if tab.ID != "" && tab.ID != "0" {
+			if explicit := explicitTabID(path); explicit != "" && explicit != tab.ID {
+				fmt.Fprintf(os.Stderr, "lightjj api: cwd is in tab %s (%s) but PATH targets /tab/%s/ explicitly — pass /api/... to target tab %s\n", tab.ID, tab.Path, explicit, tab.ID)
+			} else {
+				fmt.Fprintf(os.Stderr, "lightjj api: tab %s (%s) → %s\n", tab.ID, tab.Path, resolved)
+			}
+		}
+		path = resolved
 	}
 
 	// Resolve the body source.
@@ -404,9 +549,19 @@ func runSessionsSubcommand(args []string) int {
 		return 0
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PID\tADDR\tMODE\tREPO")
+	fmt.Fprintln(w, "PID\tADDR\tMODE\tVERSION\tREPO")
 	for _, s := range live {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", s.PID, s.Addr, s.Mode, s.RepoDir)
+		v := s.Version
+		if v == "" {
+			v = "-" // pre-version-stamp binary
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", s.PID, s.Addr, s.Mode, v, s.RepoDir)
+		// Extra tabs as continuation rows (tab 0 == REPO, already shown).
+		for _, tab := range s.Tabs {
+			if tab.ID != "0" {
+				fmt.Fprintf(w, "\t\t\t\t  tab %s: %s\n", tab.ID, tab.Path)
+			}
+		}
 	}
 	w.Flush()
 	return 0

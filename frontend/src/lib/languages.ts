@@ -15,9 +15,28 @@ import { parser as goParser } from '@lezer/go'
 import { parser as pyParser } from '@lezer/python'
 import { parser as rustParser } from '@lezer/rust'
 import { parser as cssParser } from '@lezer/css'
-import { parser as htmlParser } from '@lezer/html'
+import { parser as htmlParser, configureNesting } from '@lezer/html'
 import { parser as jsonParser } from '@lezer/json'
 import { parser as yamlParser } from '@lezer/yaml'
+
+const tsParser = jsParser.configure({ dialect: 'ts' })
+
+// No @lezer/svelte. HTML shell + @lezer/html's nesting hook (the mechanism
+// @codemirror/lang-html uses) mounts the already-bundled TS parser on <script>
+// bodies and CSS on <style>, so script code gets real tokens — colors AND the
+// data-sym identifier spans symbol-hover needs. selfClosing dialect for
+// `<Foo />`. {interpolations} and Svelte directives stay plain/attribute-ish.
+// Per-hunk caveat (same as any nested grammar): a diff hunk wholly inside the
+// script block, without the `<script>` opener in view, still parses as markup
+// text → plain; hunks that include the opener (imports region, new files,
+// expanded context) and the editor's whole-file view get the full benefit.
+const svelteParser = htmlParser.configure({
+  dialect: 'selfClosing',
+  wrap: configureNesting([
+    { tag: 'script', parser: tsParser },
+    { tag: 'style', parser: cssParser },
+  ]),
+})
 
 export type LangSpec = {
   /** File extensions AND markdown fence-lang aliases that map to this language. */
@@ -29,16 +48,14 @@ export type LangSpec = {
 }
 
 export const LANGUAGES: Record<string, LangSpec> = {
-  typescript: { exts: ['ts', 'tsx'], parser: jsParser.configure({ dialect: 'ts' }) },
+  typescript: { exts: ['ts', 'tsx'], parser: tsParser },
   javascript: { exts: ['js', 'jsx'], parser: jsParser },
   go:         { exts: ['go', 'mod', 'sum'], parser: goParser },
   python:     { exts: ['py'], parser: pyParser },
   rust:       { exts: ['rs'], parser: rustParser },
   css:        { exts: ['css'], parser: cssParser },
   html:       { exts: ['html'], parser: htmlParser },
-  // No @lezer/svelte. HTML parser handles tags/attrs/strings; {interpolations}
-  // and <script> bodies stay plain. Good enough for a diff view.
-  svelte:     { exts: ['svelte'], parser: htmlParser },
+  svelte:     { exts: ['svelte'], parser: svelteParser },
   json:       { exts: ['json'], parser: jsonParser },
   yaml:       { exts: ['yaml', 'yml'], parser: yamlParser },
   bash:       { exts: ['sh', 'bash', 'shell'], legacy: () => import('@codemirror/legacy-modes/mode/shell').then(m => m.shell) },

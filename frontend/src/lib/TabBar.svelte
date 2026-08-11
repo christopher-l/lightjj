@@ -120,7 +120,7 @@
     {#if t.stale}<span class="stale-dot" title="stale working copy"></span>{/if}
     {#if tabs.length > 1}
       <span
-        class="tab-close"
+        class="close-btn tab-close"
         role="button"
         tabindex="-1"
         onclick={(e) => { e.stopPropagation(); onclose(t.id) }}
@@ -296,21 +296,21 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 25%, transparent);
   }
 
+  /* Shared .close-btn (theme.css) supplies glyph size/color/hover-color; local
+     rules are layout + the tab-specific reveal: hidden until the tab is
+     hovered/active, and a hover chip so the × reads as a target distinct from
+     the enclosing (clickable) tab. */
   .tab-close {
     opacity: 0;
-    font-size: var(--font-size);
-    line-height: 1;
-    padding: 0 2px;
     border-radius: 3px;
     margin-right: -4px;
     transition: opacity var(--anim-duration) var(--anim-ease);
   }
   .tab:hover .tab-close,
   .tab.active .tab-close {
-    opacity: 0.5;
+    opacity: 1;
   }
   .tab-close:hover {
-    opacity: 1;
     background: var(--surface1);
   }
 

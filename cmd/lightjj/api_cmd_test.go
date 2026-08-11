@@ -138,8 +138,8 @@ func TestReadSessionsSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	// Legitimate small file.
 	writeFakeSession(t, dir, sessionInfo{PID: 100, Addr: "127.0.0.1:1", RepoDir: "/a", Mode: "local"})
-	// Oversized file (> 4 KiB) — must be skipped before parse.
-	big := append([]byte(`{"pid":200,"addr":"127.0.0.1:2","repo_dir":"/b","mode":"local"`), strings.Repeat(" ", 5000)...)
+	// Oversized file (> maxSessionFileSize) — must be skipped before parse.
+	big := append([]byte(`{"pid":200,"addr":"127.0.0.1:2","repo_dir":"/b","mode":"local"`), strings.Repeat(" ", maxSessionFileSize+1)...)
 	big = append(big, '}')
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "200.json"), big, 0o600))
 	// Unparseable file.
@@ -153,6 +153,20 @@ func TestReadSessionsSizeCap(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, 100, out[0].PID)
+}
+
+// An old-format file (pre version/tabs) must still parse, with Tabs
+// normalized to an empty slice so `sessions --json` prints [] not null.
+func TestReadSessionsOldFormat(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"pid":7,"addr":"127.0.0.1:9","port":9,"repo_dir":"/a","mode":"local","started_at":1}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "7.json"), []byte(old), 0o600))
+	out, err := readSessions(dir)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "", out[0].Version)
+	assert.NotNil(t, out[0].Tabs)
+	assert.Empty(t, out[0].Tabs)
 }
 
 func TestReadSessionsMissingDir(t *testing.T) {
@@ -176,7 +190,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
-		got, err := discoverSession(dir, repoA)
+		got, _, err := discoverSession(dir, repoA)
 		require.NoError(t, err)
 		assert.Equal(t, 10, got.PID)
 	})
@@ -185,7 +199,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
-		got, err := discoverSession(dir, repoAB)
+		got, _, err := discoverSession(dir, repoAB)
 		require.NoError(t, err)
 		assert.Equal(t, 10, got.PID)
 	})
@@ -197,7 +211,7 @@ func TestDiscoverSession(t *testing.T) {
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
 		t.Chdir(repoAB)
-		got, err := discoverSession(dir, ".")
+		got, _, err := discoverSession(dir, ".")
 		require.NoError(t, err)
 		assert.Equal(t, 10, got.PID)
 	})
@@ -207,7 +221,7 @@ func TestDiscoverSession(t *testing.T) {
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: repoAB, Mode: "local"})
 		stubPidAlive(t, 10, 11)
-		got, err := discoverSession(dir, repoAB)
+		got, _, err := discoverSession(dir, repoAB)
 		require.NoError(t, err)
 		assert.Equal(t, 11, got.PID, "deeper RepoDir should win")
 	})
@@ -216,7 +230,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t) // all dead
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		assert.Error(t, err)
 		assert.NotContains(t, err.Error(), "5001", "dead session should not be listed")
 	})
@@ -225,7 +239,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "ssh"})
 		stubPidAlive(t, 10)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		require.Error(t, err)
 		// SSH session should still appear in the alive list of the error.
 		assert.Contains(t, err.Error(), "127.0.0.1:5001")
@@ -236,7 +250,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "evil.com:80", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		assert.Error(t, err)
 	})
 
@@ -245,7 +259,7 @@ func TestDiscoverSession(t *testing.T) {
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: "/", Mode: "local"})
 		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: "//", Mode: "local"})
 		stubPidAlive(t, 10, 11)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		assert.Error(t, err)
 	})
 
@@ -253,7 +267,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: "relative/path", Mode: "local"})
 		stubPidAlive(t, 10)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		assert.Error(t, err)
 	})
 
@@ -269,7 +283,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: rootLink, Mode: "local"})
 		stubPidAlive(t, 10)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		assert.Error(t, err)
 	})
 
@@ -278,7 +292,7 @@ func TestDiscoverSession(t *testing.T) {
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10, 11)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "multiple")
 		assert.Contains(t, err.Error(), "5001")
@@ -289,7 +303,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
-		_, err := discoverSession(dir, repoC)
+		_, _, err := discoverSession(dir, repoC)
 		assert.Error(t, err)
 	})
 
@@ -305,7 +319,7 @@ func TestDiscoverSession(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
 		stubPidAlive(t, 10)
-		got, err := discoverSession(dir, link)
+		got, _, err := discoverSession(dir, link)
 		require.NoError(t, err)
 		assert.Equal(t, 10, got.PID)
 	})
@@ -315,12 +329,343 @@ func TestDiscoverSession(t *testing.T) {
 		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoC, Mode: "local"})
 		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: "/remote/path", Mode: "ssh"})
 		stubPidAlive(t, 10, 11)
-		_, err := discoverSession(dir, repoA)
+		_, _, err := discoverSession(dir, repoA)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "127.0.0.1:5001")
 		assert.Contains(t, err.Error(), "127.0.0.1:5002")
 		assert.Contains(t, err.Error(), "--addr")
 	})
+
+	// --- multi-tab discovery ---
+
+	t.Run("old-format session (no tabs) matches via RepoDir as tab 0", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local"})
+		stubPidAlive(t, 10)
+		got, tab, err := discoverSession(dir, repoAB)
+		require.NoError(t, err)
+		assert.Equal(t, 10, got.PID)
+		assert.Equal(t, sessionTab{ID: "0", Path: repoA}, tab)
+	})
+
+	t.Run("non-launch tab is discoverable", func(t *testing.T) {
+		// Launched in repoC, repoA opened as tab 2: cwd in repoA/b must find
+		// this instance (the v1 known gap) and name tab 2.
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoC, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoC}, {ID: "2", Path: repoA}}})
+		stubPidAlive(t, 10)
+		got, tab, err := discoverSession(dir, repoAB)
+		require.NoError(t, err)
+		assert.Equal(t, 10, got.PID)
+		assert.Equal(t, "2", tab.ID)
+		assert.Equal(t, repoA, tab.Path)
+	})
+
+	t.Run("nested tabs in one session: longest path wins", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoA}, {ID: "1", Path: repoAB}, {ID: "3", Path: repoC}}})
+		stubPidAlive(t, 10)
+		_, tab, err := discoverSession(dir, repoAB)
+		require.NoError(t, err)
+		assert.Equal(t, "1", tab.ID, "cwd inside both /a and /a/b must target the inner tab")
+		_, tab, err = discoverSession(dir, repoA)
+		require.NoError(t, err)
+		assert.Equal(t, "0", tab.ID)
+	})
+
+	t.Run("deeper tab in another session beats shallower launch repo", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoA}}})
+		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: repoC, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoC}, {ID: "4", Path: repoAB}}})
+		stubPidAlive(t, 10, 11)
+		got, tab, err := discoverSession(dir, repoAB)
+		require.NoError(t, err)
+		assert.Equal(t, 11, got.PID)
+		assert.Equal(t, "4", tab.ID)
+	})
+
+	t.Run("same repo open in two sessions via tabs is still a tie", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoA, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoA}}})
+		writeFakeSession(t, dir, sessionInfo{PID: 11, Addr: "127.0.0.1:5002", RepoDir: repoC, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoC}, {ID: "1", Path: repoA}}})
+		stubPidAlive(t, 10, 11)
+		_, _, err := discoverSession(dir, repoA)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple")
+		assert.Contains(t, err.Error(), "tab 1")
+	})
+
+	t.Run("ssh session tabs never match even if the path exists locally", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: "/remote", Mode: "ssh",
+			Tabs: []sessionTab{{ID: "0", Path: "/remote"}, {ID: "1", Path: repoA}}})
+		stubPidAlive(t, 10)
+		_, _, err := discoverSession(dir, repoA)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tab 1", "zero-match listing shows extra tabs")
+	})
+
+	t.Run("non-numeric tab id is dropped", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoC, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoC}, {ID: "../x", Path: repoA}}})
+		stubPidAlive(t, 10)
+		_, _, err := discoverSession(dir, repoA)
+		assert.Error(t, err)
+	})
+
+	t.Run("root tab path filtered, session survives via other tabs", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: repoC, Mode: "local",
+			Tabs: []sessionTab{{ID: "0", Path: repoC}, {ID: "1", Path: "/"}, {ID: "2", Path: repoA}}})
+		stubPidAlive(t, 10)
+		_, tab, err := discoverSession(dir, repoAB)
+		require.NoError(t, err)
+		assert.Equal(t, "2", tab.ID, `"/" tab must not universally match`)
+	})
+}
+
+func TestResolveTabPath(t *testing.T) {
+	tab2 := sessionTab{ID: "2", Path: "/x"}
+	cases := []struct {
+		name, in string
+		tab      sessionTab
+		want     string
+	}{
+		{"tab-relative rewritten", "/api/log", tab2, "/tab/2/api/log"},
+		{"query preserved", "/api/file-show?revision=@&path=a", tab2, "/tab/2/api/file-show?revision=@&path=a"},
+		{"bare /api index", "/api", tab2, "/tab/2/api"},
+		{"bare /api with query", "/api?x=1", tab2, "/tab/2/api?x=1"},
+		{"tab 0 also rewritten (kills the SPA-HTML footgun)", "/api/log", sessionTab{ID: "0"}, "/tab/0/api/log"},
+		{"explicit tab left alone", "/tab/0/api/log", tab2, "/tab/0/api/log"},
+		{"root route left alone", "/tabs", tab2, "/tabs"},
+		{"lookalike prefix left alone", "/apix/log", tab2, "/apix/log"},
+		{"no tab (e.g. --addr) → verbatim", "/api/log", sessionTab{}, "/api/log"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, resolveTabPath(c.in, c.tab))
+		})
+	}
+}
+
+func TestExplicitTabID(t *testing.T) {
+	assert.Equal(t, "3", explicitTabID("/tab/3/api/log"))
+	assert.Equal(t, "3", explicitTabID("/tab/3"))
+	assert.Equal(t, "3", explicitTabID("/tab/3?x"))
+	assert.Equal(t, "", explicitTabID("/api/log"))
+	assert.Equal(t, "", explicitTabID("/tabs"))
+}
+
+func TestVersionMismatchWarning(t *testing.T) {
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: ""}, "1.0.0"), "older server without a stamp → silent")
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.0.0"}, "1.0.0"))
+	w := versionMismatchWarning(sessionInfo{PID: 42, Version: "1.0.0"}, "1.1.0")
+	assert.Contains(t, w, "warning")
+	assert.Contains(t, w, "pid 42")
+	assert.Contains(t, w, "1.0.0")
+	assert.Contains(t, w, "1.1.0")
+
+	// Only release-number differences are the stale-binary class. Dev builds
+	// (go run → "dev"), VCS pseudo-versions, +dirty metadata and pre-release
+	// suffixes must not warn — the two-terminal dev loop pairs a go-run
+	// server with a built CLI on every call.
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "dev"}, "1.36.1"))
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.36.1"}, "dev"))
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.36.1+dirty"}, "1.36.1"))
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.36.2-0.20260811123456-abcdef123456"}, "1.36.1"))
+	assert.Empty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.37.0-rc1"}, "v1.37.0"))
+	assert.NotEmpty(t, versionMismatchWarning(sessionInfo{PID: 1, Version: "1.36.1+dirty"}, "1.37.0"))
+}
+
+func TestReleaseCore(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.2.3": "1.2.3", "v1.2.3": "1.2.3", "1.2.3+dirty": "1.2.3", "1.2.3-rc1": "1.2.3",
+		"dev": "", "": "", "1.2": "", "1.2.3.4": "", "1.x.3": "",
+		"1.36.2-0.20260811123456-abcdef123456": "",
+	} {
+		assert.Equal(t, want, releaseCore(in), in)
+	}
+}
+
+// captureStderr swaps os.Stderr for a pipe around fn and returns what was
+// written. runAPISubcommand prints straight to os.Stderr (it IS the CLI).
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan []byte)
+	go func() { b, _ := io.ReadAll(r); done <- b }()
+	fn()
+	os.Stderr = orig
+	w.Close()
+	return string(<-done)
+}
+
+// TestRunAPISubcommandMultiTab drives the discovery → tab targeting → request
+// pipeline through runAPISubcommand itself: session dir via XDG_RUNTIME_DIR,
+// a real loopback server recording the path it was hit on, stderr captured.
+func TestRunAPISubcommandMultiTab(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("session files are no-op on Windows")
+	}
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	dir := filepath.Join(base, "lightjj", "sessions")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	launch := filepath.Join(t.TempDir(), "launch")
+	other := filepath.Join(t.TempDir(), "other")
+	otherSub := filepath.Join(other, "src")
+	for _, d := range []string{launch, otherSub} {
+		require.NoError(t, os.MkdirAll(d, 0o755))
+	}
+	stubPidAlive(t, 10)
+	write := func(version string) {
+		writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: addr, RepoDir: launch, Mode: "local", Version: version,
+			Tabs: []sessionTab{{ID: "0", Path: launch}, {ID: "2", Path: other}}})
+	}
+	write(resolvedVersion())
+
+	t.Run("cwd in non-launch tab: /api/ rewritten to /tab/2/, announced on stderr", func(t *testing.T) {
+		var code int
+		stderr := captureStderr(t, func() {
+			code = runAPISubcommand([]string{"--repo", otherSub, "GET", "/api/log?limit=5"})
+		})
+		assert.Equal(t, 0, code)
+		assert.Equal(t, "/tab/2/api/log?limit=5", gotPath)
+		assert.Contains(t, stderr, "tab 2 ("+other+")")
+		assert.Contains(t, stderr, "→ /tab/2/api/log?limit=5")
+		assert.NotContains(t, stderr, "warning", "matching version → no stale-binary warning")
+	})
+
+	t.Run("explicit /tab/0/ honoured verbatim but flagged", func(t *testing.T) {
+		stderr := captureStderr(t, func() {
+			require.Equal(t, 0, runAPISubcommand([]string{"--repo", otherSub, "GET", "/tab/0/api/log"}))
+		})
+		assert.Equal(t, "/tab/0/api/log", gotPath)
+		assert.Contains(t, stderr, "targets /tab/0/ explicitly")
+	})
+
+	t.Run("cwd in launch tab: rewritten to /tab/0/, silent", func(t *testing.T) {
+		stderr := captureStderr(t, func() {
+			require.Equal(t, 0, runAPISubcommand([]string{"--repo", launch, "GET", "/api/log"}))
+		})
+		assert.Equal(t, "/tab/0/api/log", gotPath)
+		assert.Empty(t, stderr)
+	})
+
+	t.Run("--addr bypasses discovery: path verbatim, no tab logic", func(t *testing.T) {
+		stderr := captureStderr(t, func() {
+			require.Equal(t, 0, runAPISubcommand([]string{"--addr", addr, "GET", "/api/log"}))
+		})
+		assert.Equal(t, "/api/log", gotPath)
+		assert.Empty(t, stderr)
+	})
+
+	t.Run("version mismatch warns on stderr, request still sent", func(t *testing.T) {
+		// Under `go test` resolvedVersion() is "dev" (never warns by design), so
+		// pin a release version for this binary via the ldflags var.
+		version = "9.8.7"
+		t.Cleanup(func() { version = "" })
+		write("0.0.1")
+		var code int
+		stderr := captureStderr(t, func() {
+			code = runAPISubcommand([]string{"--repo", launch, "GET", "/api/log"})
+		})
+		assert.Equal(t, 0, code)
+		assert.Equal(t, "/tab/0/api/log", gotPath)
+		assert.Contains(t, stderr, "warning")
+		assert.Contains(t, stderr, "0.0.1")
+		assert.Contains(t, stderr, "9.8.7")
+	})
+
+	t.Run("PATH must start with exactly one slash", func(t *testing.T) {
+		gotPath = ""
+		for _, bad := range []string{"api/log", "//api/log"} {
+			var code int
+			stderr := captureStderr(t, func() {
+				code = runAPISubcommand([]string{"--repo", launch, "GET", bad})
+			})
+			assert.Equal(t, 2, code, bad)
+			assert.Contains(t, stderr, "single '/'", bad)
+		}
+		assert.Empty(t, gotPath, "nothing sent")
+	})
+
+	t.Run("--addr with --repo notes that --repo is ignored", func(t *testing.T) {
+		stderr := captureStderr(t, func() {
+			require.Equal(t, 0, runAPISubcommand([]string{"--addr", addr, "--repo", launch, "GET", "/tab/0/api/log"}))
+		})
+		assert.Equal(t, "/tab/0/api/log", gotPath)
+		assert.Contains(t, stderr, "--repo")
+	})
+
+	t.Run("old-format session: no warning, /api/ → /tab/0/", func(t *testing.T) {
+		old := fmt.Sprintf(`{"pid":10,"addr":%q,"repo_dir":%q,"mode":"local","started_at":1}`, addr, launch)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "10.json"), []byte(old), 0o600))
+		stderr := captureStderr(t, func() {
+			require.Equal(t, 0, runAPISubcommand([]string{"--repo", launch, "GET", "/api/log"}))
+		})
+		assert.Equal(t, "/tab/0/api/log", gotPath)
+		assert.Empty(t, stderr)
+	})
+}
+
+func TestRunSessionsSubcommandShowsVersionAndTabs(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	dir := filepath.Join(base, "lightjj", "sessions")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	writeFakeSession(t, dir, sessionInfo{PID: 10, Addr: "127.0.0.1:5001", RepoDir: "/a", Mode: "local", Version: "1.2.3",
+		Tabs: []sessionTab{{ID: "0", Path: "/a"}, {ID: "1", Path: "/b"}}})
+	old := `{"pid":11,"addr":"127.0.0.1:5002","repo_dir":"/c","mode":"local","started_at":1}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "11.json"), []byte(old), 0o600))
+	stubPidAlive(t, 10, 11)
+
+	out := captureStdout(t, func() { require.Equal(t, 0, runSessionsSubcommand(nil)) })
+	assert.Contains(t, out, "VERSION")
+	assert.Contains(t, out, "1.2.3")
+	assert.Contains(t, out, "tab 1: /b")
+	assert.NotContains(t, out, "tab 0", "tab 0 is the REPO column, not repeated")
+	assert.Regexp(t, `11\s+127\.0\.0\.1:5002\s+local\s+-\s+/c`, out, "old-format session shows - for version")
+
+	js := captureStdout(t, func() { require.Equal(t, 0, runSessionsSubcommand([]string{"--json"})) })
+	var parsed []sessionInfo
+	require.NoError(t, json.Unmarshal([]byte(js), &parsed))
+	require.Len(t, parsed, 2)
+	assert.Equal(t, "1.2.3", parsed[0].Version)
+	assert.Len(t, parsed[0].Tabs, 2)
+	assert.Contains(t, js, `"tabs": []`, "old-format session serializes tabs as [] not null")
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stdout
+	os.Stdout = w
+	done := make(chan []byte)
+	go func() { b, _ := io.ReadAll(r); done <- b }()
+	fn()
+	os.Stdout = orig
+	w.Close()
+	return string(<-done)
 }
 
 // echoHandler writes the request method, path, query, content-type, and body

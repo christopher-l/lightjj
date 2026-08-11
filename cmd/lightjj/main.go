@@ -294,14 +294,20 @@ func main() {
 			dialAddr = fmt.Sprintf("localhost:%d", port)
 		}
 	}
-	sessionFile := writeSessionFile(sessionInfo{
+	// The tab list (tab 0 included) rides along so an agent whose cwd is in
+	// a non-launch tab's repo can still discover this instance; the writer
+	// re-snapshots tm.TabRefs() on every open/close via tm.OnTabsChange.
+	session := newSessionWriter(sessionInfo{
 		PID:       os.Getpid(),
 		Addr:      dialAddr,
 		Port:      port,
 		RepoDir:   displayPath,
 		Mode:      tm.Mode,
 		StartedAt: time.Now().UnixMilli(),
-	})
+		Version:   resolvedVersion(),
+	}, func() []sessionTab { return sessionTabsOf(tm.TabRefs()) })
+	session.Update()
+	tm.OnTabsChange = session.Update
 
 	if !*noBrowser {
 		openBrowser(url)
@@ -315,7 +321,7 @@ func main() {
 		case <-sigCh:
 		case <-tm.ShutdownCh:
 		}
-		_ = os.Remove(sessionFile)
+		session.Remove()
 		tm.Shutdown()
 		os.Exit(0)
 	}()

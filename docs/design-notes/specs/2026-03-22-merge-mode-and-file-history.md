@@ -58,7 +58,7 @@ Current headers show only `sides.oursLabel` (the quoted commit description from 
 ### 1.4 "Take all ours" / "Take all theirs" bulk actions ✅
 
 - Toolbar buttons: `→→ All ours` / `All theirs ←←` (green/blue tinted to match flank colors).
-- `takeAll(side)` loops `takeBlock(i, side)`. Synchronous dispatches land within CM6's `newGroupDelay` (500ms) → typically one Cmd+Z undoes the batch. Empty-source blocks included — "take ours" when ours has nothing = delete center content (planTake's srcEmpty branch), semantically correct.
+- `takeAll(side)` dispatches ONE transaction (`takeAllSpec`: per-block plans computed against the running intermediate doc/tracker, ChangeSets composed, one `applyBlock` effect per block) → exactly one Cmd+Z undoes the batch whatever the block shapes. (Originally it looped `takeBlock` and relied on CM6's 500ms grouping — which only joins ADJACENT changes and never an empty one, so it was really N undo steps; fixed 2026-08.) Empty-source blocks included — "take ours" when ours has nothing = delete center content (planTake's K=0 shape), semantically correct.
 - **Invariant test:** `takeAll(side) → save() emits sides[side]`. Round-trips through every block's planTake separator-math.
 
 ### 1.5 Keyboard-first block navigation — DEFERRED

@@ -986,7 +986,11 @@ export function guardEffectiveIdCollisions(entries: LogEntry[]): LogEntry[] {
 export type MutationResult = { output: string; warnings?: string }
 
 export type DiffTarget =
-  | { kind: 'single'; commitId: string; changeId: string; isWorkingCopy: boolean; immutable: boolean }
+  // parentIds: parent commit_ids (Commit.parent_ids) — lets consumers address
+  // the "before" tree by a stable, immutable-cacheable id instead of the
+  // child-keyed `<commitId>-` revset (binary image diff). Optional so older
+  // constructors/tests stay valid; NOT part of diffTargetKey.
+  | { kind: 'single'; commitId: string; changeId: string; isWorkingCopy: boolean; immutable: boolean; parentIds?: string[] }
   | { kind: 'multi'; revset: string; commitIds: string[] }
 
 /** Stable cache key for a DiffTarget. commit_id for single-rev

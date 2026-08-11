@@ -51,6 +51,14 @@ type TabFactory func(path string) *Server
 // creation is disabled.
 type TabResolve func(path string) (string, error)
 
+// TabRef is the minimal identity of an open tab exposed to out-of-package
+// listeners (cmd/lightjj's agent-discovery session file): the route id (the N
+// in /tab/{N}/) and the canonical workspace root it is mounted for.
+type TabRef struct {
+	ID   string
+	Path string
+}
+
 // TabManager owns the top-level mux. Each repo tab is a full Server mounted
 // at /tab/{id}/ via StripPrefix — Server struct stays untouched, zero handler
 // changes. Host-scoped routes (config, static files) live on this mux directly.
@@ -72,6 +80,17 @@ type TabManager struct {
 	// hosts share one state.json, so the restore loop must filter by host.
 	Mode string
 	Host string
+
+	// OnTabsChange, if non-nil, is called after a tab is opened or closed via
+	// the HTTP handlers (outside m.mu, after the response body is written but before the handler returns — same
+	// placement as persistTabs). It carries no snapshot on purpose: two
+	// concurrent creates would otherwise race to deliver stale snapshots in
+	// either order; listeners call TabRefs() under their own lock instead.
+	// Startup AddTab calls do NOT fire it — main.go takes its initial snapshot
+	// after the restore loop. Set before serving (plain field, like Mode).
+	// Used by cmd/lightjj to keep the agent-discovery session file's tab list
+	// current; internal/api stays ignorant of session files.
+	OnTabsChange func()
 
 	// Cross-tab idle-shutdown. Counts SSE subscribers across ALL tabs — a
 	// per-Watcher count would fire when the user switches tabs (old tab's
@@ -324,7 +343,30 @@ func (m *TabManager) handleCreate(w http.ResponseWriter, r *http.Request) {
 	t := m.addLocked(srv, root)
 	m.mu.Unlock()
 	m.writeTab(w, t)
+	m.tabsChanged()
+}
+
+// tabsChanged runs the post-open/close side effects: persist to state.json,
+// then notify the out-of-package listener (session file). Both call sites
+// invoke it AFTER writing their HTTP response and outside m.mu.
+func (m *TabManager) tabsChanged() {
 	m.persistTabs()
+	if m.OnTabsChange != nil {
+		m.OnTabsChange()
+	}
+}
+
+// TabRefs returns the id + canonical path of every open tab (startup tab 0
+// included) in id order. Snapshot under RLock; safe from any goroutine.
+func (m *TabManager) TabRefs() []TabRef {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	tabs := m.sortedTabs()
+	out := make([]TabRef, len(tabs))
+	for i, t := range tabs {
+		out[i] = TabRef{ID: t.ID, Path: t.Path}
+	}
+	return out
 }
 
 // persistTabs snapshots the current non-startup tabs to state.json (the
@@ -421,5 +463,5 @@ func (m *TabManager) handleClose(w http.ResponseWriter, r *http.Request) {
 	// Persist after response written — state I/O shouldn't delay the UI,
 	// and holding m.mu across SetOpenTabs would nest it with stateMu
 	// (harmless today but a lock-ordering smell).
-	m.persistTabs()
+	m.tabsChanged()
 }

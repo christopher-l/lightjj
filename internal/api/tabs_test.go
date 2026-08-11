@@ -286,6 +286,51 @@ func TestTabManager_OpenTabRoots(t *testing.T) {
 	assert.ElementsMatch(t, []string{"/repo/main"}, s0.OpenTabRoots())
 }
 
+// TestTabManager_TabRefsAndOnTabsChange covers the out-of-package hook the
+// agent-discovery session file rides on: TabRefs snapshots id+path in id
+// order (tab 0 included), OnTabsChange fires after HTTP open and close but
+// NOT for startup AddTab, and a listener calling TabRefs from inside the
+// callback sees the post-change set (callback runs outside m.mu).
+func TestTabManager_TabRefsAndOnTabsChange(t *testing.T) {
+	mkSrv := func() *Server {
+		r := testutil.NewMockRunner(t)
+		r.Allow(jj.CurrentOpId()).SetOutput([]byte("op"))
+		return NewServer(r, "")
+	}
+	tm := NewTabManager(func(string) *Server { return mkSrv() }, func(p string) (string, error) { return p, nil })
+	var seen [][]TabRef
+	tm.OnTabsChange = func() { seen = append(seen, tm.TabRefs()) }
+
+	tm.AddTab(mkSrv(), "/repo/main")
+	tm.AddTab(mkSrv(), "/repo/restored")
+	assert.Empty(t, seen, "startup AddTab must not fire OnTabsChange")
+	assert.Equal(t, []TabRef{{ID: "0", Path: "/repo/main"}, {ID: "1", Path: "/repo/restored"}}, tm.TabRefs())
+
+	w := httptest.NewRecorder()
+	tm.Mux.ServeHTTP(w, jsonPost("/tabs", []byte(`{"path":"/repo/new"}`)))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, seen, 1)
+	assert.Equal(t, []TabRef{{"0", "/repo/main"}, {"1", "/repo/restored"}, {"2", "/repo/new"}}, seen[0])
+
+	// Dedup hit (already open) is not a change.
+	w = httptest.NewRecorder()
+	tm.Mux.ServeHTTP(w, jsonPost("/tabs", []byte(`{"path":"/repo/new"}`)))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Len(t, seen, 1)
+
+	w = httptest.NewRecorder()
+	tm.Mux.ServeHTTP(w, httptest.NewRequest("DELETE", "/tabs/1", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, seen, 2)
+	assert.Equal(t, []TabRef{{"0", "/repo/main"}, {"2", "/repo/new"}}, seen[1])
+
+	// Rejected close (tab 0) is not a change either.
+	w = httptest.NewRecorder()
+	tm.Mux.ServeHTTP(w, httptest.NewRequest("DELETE", "/tabs/0", nil))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Len(t, seen, 2)
+}
+
 func TestTabFindByPath(t *testing.T) {
 	tm := NewTabManager(nil, nil)
 	runner := testutil.NewMockRunner(t)

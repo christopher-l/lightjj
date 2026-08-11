@@ -106,6 +106,53 @@ describe('DestinationInput', () => {
     expect(onsubmit).toHaveBeenCalledWith('feature')
   })
 
+  it('mouse hover is a separate dim highlight and never changes what Enter submits', async () => {
+    // BookmarkPicker uses the PANEL hover pattern: delegated mousemove over
+    // [data-idx] rows sets a JS-tracked .hovered (no :hover CSS rule), while
+    // .active stays the keyboard cursor. Index -1 is semantic ("Enter submits
+    // the raw text"), so a mouse grazing a row must not turn a typed revset
+    // prefix into a bookmark pick.
+    const onsubmit = vi.fn()
+    mockBookmarks.mockResolvedValue([
+      makeBookmark('feature'),
+      makeBookmark('fix-bug'),
+    ])
+    const { container } = render(DestinationInput, { props: defaultProps({ onsubmit }) })
+
+    await fireEvent.input(input(container), { target: { value: 'f' } })
+    await waitFor(() => expect(suggestions(container).length).toBe(2))
+
+    // Arrow selection is the single .active; hover is a separate .hovered
+    // that clears on mouseleave.
+    await fireEvent.keyDown(input(container), { key: 'ArrowDown' })
+    expect(suggestions(container)[0].classList.contains('active')).toBe(true)
+    await fireEvent.mouseMove(suggestions(container)[1])
+    expect(suggestions(container)[1].classList.contains('hovered')).toBe(true)
+    expect(suggestions(container)[1].classList.contains('active')).toBe(false)
+    expect(suggestions(container)[0].classList.contains('active')).toBe(true)
+    await fireEvent.mouseLeave(container.querySelector('.bm-set-suggestions')!)
+    expect(container.querySelectorAll('.hovered').length).toBe(0)
+
+    // Typing resets the arrow cursor; with a row hovered, Enter still submits
+    // the typed text, not the hovered row.
+    await fireEvent.input(input(container), { target: { value: 'fi' } })
+    await waitFor(() => expect(suggestions(container).length).toBe(1))
+    await fireEvent.mouseMove(suggestions(container)[0])
+    expect(suggestions(container)[0].classList.contains('hovered')).toBe(true)
+    await fireEvent.keyDown(input(container), { key: 'Enter' })
+    expect(onsubmit).toHaveBeenCalledWith('fi')
+  })
+
+  it('empty input + hovered row + Enter is a no-op (hover cannot cause a mutation)', async () => {
+    const onsubmit = vi.fn()
+    mockBookmarks.mockResolvedValue([makeBookmark('main')])
+    const { container } = render(DestinationInput, { props: defaultProps({ onsubmit }) })
+    await waitFor(() => expect(suggestions(container).length).toBe(1))
+    await fireEvent.mouseMove(suggestions(container)[0])
+    await fireEvent.keyDown(input(container), { key: 'Enter' })
+    expect(onsubmit).not.toHaveBeenCalled()
+  })
+
   it('Escape closes without submitting', async () => {
     const onsubmit = vi.fn()
     mockBookmarks.mockResolvedValue([])

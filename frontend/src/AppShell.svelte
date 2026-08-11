@@ -12,9 +12,13 @@
   import { groupTabs, tabGroupKey, type TabGroup } from './lib/tab-groups'
   import { workspaceSectionItems, tabMenuItems, type WorkspaceSectionOpts } from './lib/workspace-menu'
   import { planRecoverAll, recoverAllMessage } from './lib/workspace-recovery'
+  import { parseUrlIntent, stripUrlIntent } from './lib/url-intent'
+
+  // Tab 0 is the launch repo (the `-R` flag); api.ts's basePath defaults to it.
+  const LAUNCH_TAB_ID = '0'
 
   let tabs: TabInfo[] = $state([])
-  let activeTabId: string = $state('0')
+  let activeTabId: string = $state(LAUNCH_TAB_ID)
   let shellMessage: Message | null = $state(null)
   let appRef: ReturnType<typeof App> | undefined = $state(undefined)
 
@@ -23,6 +27,29 @@
   // load-bearing (SSE lifecycle, onStale wiring) — this just threads cursor
   // position + scroll through it.
   const tabState = new Map<string, TabState>()
+
+  // Routable URL (issue #35): `/?change=<id>[&revset=<r>][&path=<f>]` — e.g. an
+  // agent handing the user a link to the change it made. Parsed ONCE at boot
+  // and applied only to the launch tab's first App mount, via the same
+  // initialState channel as tab-switch restore: `revset` seeds revsetFilter (so
+  // the very first loadLog already uses it — no double load); `change`/`path`
+  // ride as the one-shot selectRef/selectPath (App owns select → widen-once →
+  // warn). Stripped from the address bar right away — the intent now lives in
+  // tabState, and a browser refresh should return to the base URL rather than
+  // re-apply stale intent (stripping here, not after App finishes applying,
+  // also covers a first load that never succeeds).
+  const urlIntent = parseUrlIntent(location.search)
+  if (urlIntent) {
+    tabState.set(LAUNCH_TAB_ID, {
+      selectedId: null,
+      revsetFilter: urlIntent.revset ?? '',
+      activeView: 'log',
+      diffScrollTop: 0,
+      selectRef: urlIntent.change,
+      selectPath: urlIntent.path,
+    })
+    history.replaceState(history.state, '', location.pathname + stripUrlIntent(location.search) + location.hash)
+  }
 
   // basePath defaults to '/tab/0' in api.ts, so App can mount immediately
   // without waiting for listTabs. The tab list populates asynchronously.

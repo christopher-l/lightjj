@@ -443,8 +443,8 @@ export function createFileActions(deps: FileActionsDeps): FileActions {
 
   /** One-click whole-file resolve to ours/theirs WITHOUT the 3-pane editor —
    *  the common "just take my/their side" case. Writes the full reconstructed
-   *  side (sides.ours/theirs), NOT planTake's incremental block surgery, so it
-   *  sidesteps planTake's blank-line separator gap entirely (see BACKLOG.md).
+   *  side (sides.ours/theirs), NOT planTake's incremental block surgery — no
+   *  per-block position tracking is needed when the whole side is the answer.
    *  Fetches WITHOUT moving @ (pure read), then writes via writeResolution
    *  (conflict-resolve.ts: @ → fileWrite, non-@ local → mergeResolve, non-@
    *  SSH → explicit jj-edit fallback). N-way / git-style / auto-resolved-race

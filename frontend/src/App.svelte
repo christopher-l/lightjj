@@ -17,6 +17,15 @@
     revsetFilter: string
     activeView: 'log' | 'branches'
     diffScrollTop: number
+    /** ONE-SHOT mount intent (routable URL, issue #35 — AppShell seeds it from
+     *  `?change=`): select this change/commit id (full or unique prefix) after
+     *  the first log load, auto-widening the revset once on a miss. Distinct
+     *  from `selectedId` (an exact effectiveId with silent @-fallback). Never
+     *  emitted by getState(), so a tab-switch-back can't re-apply it. */
+    selectRef?: string
+    /** ONE-SHOT companion (`?path=`): scroll the selected revision's diff to
+     *  this file once it loads. Same getState() exclusion. */
+    selectPath?: string
   }
 </script>
 
@@ -62,6 +71,7 @@
 
   import { api, effectiveId, multiRevset, computeConnectedCommitIds, getCached, prefetchRevision, prefetchFilesBatch, onStale, onStaleWC, onPollFail, onSSEState, onNavigate, wireAutoRefresh, clearAllCaches, bookmarkPushFlags, agentBaseURL, type LogEntry, type FileChange, type OpEntry, type EvologEntry, type Workspace, type Alias, type PullRequest, type DiffTarget, type Bookmark, type MutationResult, type StaleImmutableGroup, type NavigatePayload, type TabInfo } from './lib/api'
   import { groupTabs } from './lib/tab-groups'
+  import { changeLink, findRevisionIndexByRef, isRevisionIdLike, locatorRevset } from './lib/url-intent'
   import { setDetectedJJVersion, missingJJFeatures } from './lib/jj-features.svelte'
   import { canCreatePR, bookmarkCreatePREligibility, prCompareUrl } from './lib/bookmark-sync'
   import MessageBar, { errorMessage, type Message } from './lib/MessageBar.svelte'
@@ -115,7 +125,9 @@
   // through selectRevision/selectRevisionCursorOnly/loadLog reconciliation.
   let selectedId: string | null = $state(init?.selectedId ?? null)
   let revsetFilter: string = $state(init?.revsetFilter ?? '')
-  let pendingScrollRestore: number | null = init?.diffScrollTop ?? null
+  // 0 = nothing to restore: a fresh mount's diff panel is already at the top,
+  // and a forced late setScrollTop(0) would clobber a selectPath file scroll.
+  let pendingScrollRestore: number | null = init?.diffScrollTop || null
 
   // Single user-facing message surface. Replaces error/lastAction/commandOutput.
   let message: Message | null = $state(null)
@@ -1218,7 +1230,7 @@
     createOpSync({ opId: () => currentOpId, gate: opSyncGate, ...opts })
 
   // Deferred-intent flag: userRefresh(true)/handleRevsetSubmit set it, the next
-  // log run consumes it. Same pattern as pendingSelectCommitId — refresh() takes
+  // log run consumes it. Same pattern as pendingSelect — refresh() takes
   // no arguments, so explicit intent travels via App state.
   let pendingResetSelection = false
 
@@ -1255,25 +1267,46 @@
   // to operations that happen while the app is open.
   const staleImmSync = opSync({ run: () => staleImm.load(), throttleMs: SLOW_MIRROR_MS, startFresh: true })
 
+  // loadLog is log.load's SOLE caller, so a per-run counter tells a superseded
+  // run (a newer loadLog started) from an errored one (still latest, log.error
+  // set) — log.load() itself returns false for both.
+  let logRunGen = 0
   async function loadLog(): Promise<boolean> {
     const resetRequested = pendingResetSelection
     pendingResetSelection = false
+    const run = ++logRunGen
 
     const revset = revsetFilter || undefined
     const ok = await log.load(revset)
     blurActiveInput()
-    if (!ok) return false // superseded or errored — don't post-process stale state
+    if (!ok) {
+      // Superseded or errored — don't post-process stale state. One exception:
+      // the ERRORED widen reload of a `?change=` locate (an ambiguous short
+      // prefix errors even inside present()). Never leave the locator in the
+      // filter: clear the slot, put the previous revset back, and keep jj's
+      // error message (no not-found overwrite). A superseded run leaves the
+      // slot for whichever load actually applies.
+      // (Sole-caller invariant: still-latest + !ok ⇒ the load threw — no
+      // log.error check, so an empty-message error can't masquerade as
+      // superseded and strand the locator.)
+      const errored = run === logRunGen
+      if (errored && pendingSelect?.restoreRevset !== undefined) {
+        const p = pendingSelect
+        pendingSelect = null
+        restorePreWidenRevset(p)
+      }
+      return false
+    }
     let resetSelection = resetRequested
 
-    // pendingSelectCommitId: jumpToBookmark's deferred selection. Consume
-    // here; on hit suppress resetSelection (which handleRevsetSubmit requests
-    // via pendingResetSelection).
-    let pending = pendingSelectCommitId
-    pendingSelectCommitId = null
-    if (pending) {
-      const entry = revisions.find(r => r.commit.commit_id === pending)
-      if (entry) { selectedId = effectiveId(entry.commit); resetSelection = false }
-    }
+    // Deferred selection (jumpToBookmark, `?change=` URL intent). Applied
+    // loads only → race-free vs supersedes. A hit suppresses resetSelection
+    // (which handleRevsetSubmit requested via pendingResetSelection); a
+    // widen/restore resubmit makes THIS load stale — stop here, the reload
+    // reconciles (handleRevsetSubmit already reset the diff/checks).
+    const pend = consumePendingSelect()
+    if (pend.status === 'resubmitted') return true
+    if (pend.status === 'hit') resetSelection = false
     // Identity reconciliation: if the selected revision still exists, the
     // cursor stays on it (selectedIndex re-derives its possibly-shifted
     // position). If it disappeared (external abandon, narrower revset) — or a
@@ -1283,6 +1316,10 @@
     if (resetSelection || !stillExists) {
       selectedId = workingCopyEntry ? effectiveId(workingCopyEntry.commit) : null
     }
+    // `?path=`: scroll the finally-selected revision's diff to the file, via the
+    // agent-navigate pendingNavScroll machinery (waits for that diff to be the
+    // loadedTarget; identity-checked, so a j/k away drops it).
+    if (pend.path && selectedId !== null) pendingNavScroll = { changeId: selectedId, path: pend.path }
     if (checkedRevisions.size > 0) {
       const validIds = new Set(revisions.map(r => effectiveId(r.commit)))
       for (const id of [...checkedRevisions]) {
@@ -1399,10 +1436,104 @@
     return idx >= 0
   }
 
-  // BookmarksPanel jump: consumed by loadLog's post-load selection when the
-  // bookmark's commit isn't in the current revset. Set BEFORE revsetFilter
-  // write so the effect-triggered loadLog sees it.
-  let pendingSelectCommitId: string | null = null
+  /** Deferred-selection slot, consumed ONLY by loadLog's reconciliation of an
+   *  APPLIED load (superseded/errored loads never reach it — so supersedes are
+   *  race-free by construction: whichever load actually lands consumes it).
+   *  State machine (see consumePendingSelect / loadLog's error path):
+   *    armed    {ref, widen:true}            hit → select (+path scroll), clear
+   *                                          miss, id-like → spend: remember restoreRevset,
+   *                                            revsetFilter = locatorRevset(ref), resubmit
+   *                                          miss, not id-like → warn "use ?revset=", clear
+   *    spent    {ref, widen:false, restoreRevset}
+   *                                          hit → select, clear (locator stays: it shows the target)
+   *                                          miss / jj error → clear, restore restoreRevset iff the
+   *                                            filter is still OUR locator, warn (an error keeps
+   *                                            jj's message instead of the not-found warning)
+   *    plain    {ref, widen:false}           jumpToBookmark: hit → select; miss → silent, clear
+   *  Any explicit USER revset submission (input Enter/Escape, preset/example,
+   *  clear) goes through userRevsetSubmit, which demotes armed → plain and
+   *  drops a spent slot: stale URL intent must never WIDEN over a revset the
+   *  user typed later (an armed slot otherwise survives an errored first load
+   *  indefinitely), while a hit inside their own view still selects; and a
+   *  superseded in-flight widen ends silently instead of warning against an
+   *  unrelated view.
+   *  Seeded from the one-shot init.selectRef/selectPath so the FIRST applied
+   *  loadLog selects a `?change=` target directly — no @-flash, no second diff
+   *  load, no promise chain to race. Set BEFORE a revsetFilter write so the
+   *  triggered loadLog sees it. */
+  interface PendingSelect {
+    /** change/commit id, full or unique prefix ('' = `?path=` alone: no select, just scroll) */
+    ref: string
+    /** may widen the revset once on a miss (URL intent only) */
+    widen: boolean
+    /** present once the widen is spent: the filter to put back if the locate fails */
+    restoreRevset?: string
+    /** `?path=`: scroll the selected revision's diff here (via pendingNavScroll) */
+    path?: string
+  }
+  let pendingSelect: PendingSelect | null = (init?.selectRef || init?.selectPath)
+    ? { ref: init.selectRef ?? '', widen: true, path: init.selectPath }
+    : null
+
+  /** True iff the filter still holds the locator WE installed for this slot —
+   *  the guard before restoring: never clobber a revset the user typed since. */
+  const holdsOurLocator = (p: PendingSelect) =>
+    p.restoreRevset !== undefined && revsetFilter === locatorRevset(p.ref)
+
+  /** Put back the pre-widen filter and reload, WITHOUT userRefresh's
+   *  setMessage(null) — the caller's warning / jj's error must stay visible. */
+  function restorePreWidenRevset(p: PendingSelect) {
+    if (!holdsOurLocator(p)) return
+    revsetFilter = p.restoreRevset!
+    nav.cancel()
+    diff.reset()
+    files.reset()
+    clearChecks()
+    pendingResetSelection = true
+    void logSync.refresh()
+  }
+
+  /** loadLog's reconciliation step for the slot (applied loads only).
+   *  `status`: 'hit' = selectedId was set (suppress resetSelection);
+   *  'resubmitted' = a widen/restore reload was kicked, so the caller stops
+   *  post-processing this now-stale load; 'none' otherwise. `path`: a `?path=`
+   *  scroll to arm against whatever revision the caller's reconciliation
+   *  finally selects (the hit, or @ for `?path=` alone). */
+  function consumePendingSelect(): { status: 'hit' | 'resubmitted' | 'none'; path?: string } {
+    const p = pendingSelect
+    pendingSelect = null
+    if (!p) return { status: 'none' }
+    if (!p.ref) return { status: 'none', path: p.path } // `?path=` alone
+    const idx = findRevisionIndexByRef(revisions, p.ref)
+    if (idx >= 0) {
+      selectedId = effectiveId(revisions[idx].commit)
+      return { status: 'hit', path: p.path }
+    }
+    if (p.widen) {
+      if (!isRevisionIdLike(p.ref)) {
+        setMessage({ kind: 'warning', text: `"${p.ref}" is not a change/commit id — use ?revset= for bookmarks or revset expressions` })
+        return { status: 'none' }
+      }
+      // Spend the one widen: keep the slot, swap in the locator, reload. The
+      // reload's own (applied) reconciliation lands in the `spent` branch.
+      pendingSelect = { ...p, widen: false, restoreRevset: revsetFilter }
+      revsetFilter = locatorRevset(p.ref)
+      void handleRevsetSubmit()
+      return { status: 'resubmitted' }
+    }
+    if (p.restoreRevset !== undefined) {
+      // Widen spent and still missing. Restore first (only if the filter is
+      // still our locator), THEN warn — restore doesn't clear messages. If the
+      // filter is no longer our locator, this applied load is something else
+      // (the locator load never landed) — "also tried" would be false, so end
+      // silently.
+      if (!holdsOurLocator(p)) return { status: 'none' }
+      restorePreWidenRevset(p)
+      setMessage({ kind: 'warning', text: `Revision ${p.ref} not found (also tried ${locatorRevset(p.ref)})` })
+      return { status: 'resubmitted' }
+    }
+    return { status: 'none' } // plain (jumpToBookmark) miss — silent, as before
+  }
 
   // Right-click on a RevisionGraph bookmark badge. The component emits only the
   // bookmark name (domain object); App builds the items (CLAUDE.md "Adding a
@@ -1504,7 +1635,7 @@
     // Not loaded: reload with a context-preserving revset. | @ keeps the
     // working copy visible for @-jump-back. commit_id is hex-safe unquoted;
     // bookmark names can contain revset operators (@ in git refs) → revsetQuote.
-    pendingSelectCommitId = commitId
+    pendingSelect = { ref: commitId, widen: false }
     const target = (bm.local && !overrideCommitId) ? revsetQuote(bm.name) : commitId
     revsetFilter = `ancestors(${target}, 20) | @`
     handleRevsetSubmit()
@@ -1573,6 +1704,9 @@
       { separator: true },
       { label: `Copy change ID (${(entry?.commit.change_id ?? changeId).slice(0, 8)})`, action: () => navigator.clipboard.writeText(entry?.commit.change_id ?? changeId) },
       { label: `Copy commit ID (${commitId.slice(0, 8)})`, action: () => navigator.clipboard.writeText(commitId) },
+      // The persistent discoverability surface for routable URLs (?change=):
+      // changeId here is effectiveId, so a divergent commit links by commit_id.
+      { label: 'Copy link to this change', action: () => navigator.clipboard.writeText(changeLink(location.origin, changeId)) },
       { separator: true },
       { label: 'Abandon', action: () => handleAbandon(changeId), danger: true },
     )
@@ -2559,17 +2693,34 @@
     return logSync.refresh()
   }
 
-  function handleRevsetSubmit() {
+  /** Apply the current `revsetFilter`. Resolves (with loadLog's applied flag)
+   *  once the reload — including its cursor reconciliation / pendingSelect
+   *  consumption — completes, so callers can await it. */
+  function handleRevsetSubmit(): Promise<boolean> {
     nav.cancel()
     diff.reset()
     files.reset()
     clearChecks()
-    userRefresh(true)
+    return userRefresh(true)
+  }
+
+  /** handleRevsetSubmit for an explicit USER revset choice (typed, cleared,
+   *  preset/example): drops any pending `?change=` intent first — see the
+   *  PendingSelect state machine. Programmatic writers (visibility sync,
+   *  jumpToBookmark, the widen itself) call handleRevsetSubmit directly. */
+  function userRevsetSubmit(): Promise<boolean> {
+    // Armed → plain (a hit in the user's own view still selects — harmless
+    // and helpful; a miss ends silently, never widens over their revset).
+    // Spent → dropped (they replaced our locator; nothing to restore or warn).
+    pendingSelect = pendingSelect && pendingSelect.restoreRevset === undefined
+      ? { ...pendingSelect, widen: false }
+      : null
+    return handleRevsetSubmit()
   }
 
   function clearRevsetFilter() {
     revsetFilter = ''
-    handleRevsetSubmit()
+    userRevsetSubmit()
   }
 
   // --- Revset help popover ---
@@ -2579,7 +2730,7 @@
   function applyRevsetExample(revset: string) {
     revsetHelpOpen = false
     revsetFilter = revset
-    handleRevsetSubmit()
+    userRevsetSubmit()
   }
 
   // Click-outside + Escape close for the help popover.
@@ -3050,6 +3201,10 @@
   // staleImmSync is deliberately absent (startFresh: created already-applied, so
   // the expensive scan never runs at mount); loadInfo is not op-id state at all
   // (repo identity can't change for a running server).
+  // The routable-URL one-shot (`?change=`/`?path=`, issue #35) needs no chain
+  // here: it was seeded into `pendingSelect`, which loadLog's reconciliation
+  // consumes on the first APPLIED load (`?revset=` arrived as init.revsetFilter,
+  // so this refresh IS the revset load).
   void logSync.refresh()
   loadInfo()
   void workspacesSync.refresh()
@@ -3065,7 +3220,11 @@
       // Identity, not index: the backgrounded tab's log can shift before the
       // user switches back (SSE keeps flowing into the new instance).
       selectedId,
-      revsetFilter,
+      // Mid-widen (`?change=` locate in flight) the filter temporarily holds
+      // OUR locator and the slot dies with this instance — snapshot the
+      // user's real revset instead so the tab doesn't come back filtered to
+      // an unexplained locator.
+      revsetFilter: pendingSelect && holdsOurLocator(pendingSelect) ? pendingSelect.restoreRevset! : revsetFilter,
       // Merge/doc modes are NOT preserved across tabs — half-done conflict
       // resolution or in-progress doc edit across tab-switch is a footgun.
       activeView: activeView === 'merge' || activeView === 'doc' ? 'log' : activeView,
@@ -3240,7 +3399,7 @@
               onkeydown={(e: KeyboardEvent) => {
                 if (e.key === 'Enter') {
                   e.preventDefault()
-                  handleRevsetSubmit()
+                  userRevsetSubmit()
                   revsetInputEl?.blur()
                 } else if (e.key === 'Escape') {
                   e.preventDefault()

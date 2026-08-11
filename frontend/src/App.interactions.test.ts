@@ -28,8 +28,9 @@ vi.stubGlobal('fetch', async () => new Response(null, { status: 204 }))
 import App from './App.svelte'
 import {
   resetMockApi, calls, triggerNavigate, triggerStale,
-  setFixtures, defaultFixtures, mkRevision,
+  setFixtures, defaultFixtures, mkRevision, setLogHandler,
 } from './testutil/mock-api'
+import type { LogEntry } from './lib/api'
 import { waitFor } from './testutil/wait-for'
 
 // Dispatch on body, not window: event.target must be an HTMLElement for
@@ -407,5 +408,198 @@ describe('App tab/workspace integration', () => {
       .find(el => el.querySelector('.palette-label')?.textContent?.includes('Switch to repo: beta'))!
     await fireEvent.click(item)
     expect(onSwitchTab).toHaveBeenCalledWith('1')
+  })
+})
+
+// Routable URL (issue #35): AppShell parses `?change=&revset=&path=` into the
+// launch tab's initialState (revsetFilter + one-shot selectRef/selectPath).
+// App's job: the FIRST log load uses the revset, the ref (full or unique
+// prefix) is selected off the first APPLIED load, a miss widens the revset
+// exactly once via locatorRevset, and a final miss / jj error restores the
+// previous revset. The slot is consumed only by applied loads, so a superseded
+// first load can't trigger a spurious widen.
+describe('App routable-URL initial selection', () => {
+  const logCalls = () => calls.filter(c => c.method === 'log')
+  const logRevsets = () => logCalls().map(c => c.args[0])
+  const state = (over: Record<string, unknown>) => ({ props: { initialState: {
+    selectedId: null, revsetFilter: '', activeView: 'log', diffScrollTop: 0, ...over,
+  } } })
+  const rows = () => document.querySelectorAll('.graph-row.node-row').length
+  const revsetInput = () => (qs('.revset-input') as HTMLInputElement | null)?.value
+  const settle = () => new Promise(r => setTimeout(r, 40))
+  // A target that is NOT in the default 3-row log. Ids chosen to pass
+  // isRevisionIdLike: change id from jj's k–z alphabet, commit id hex.
+  const TARGET_CHANGE = 'xtrst'
+  const LOCATOR = `present(${TARGET_CHANGE}) | present(@) | present(trunk())`
+  const withTarget = (): LogEntry[] =>
+    [...defaultFixtures().revisions, mkRevision({ change_id: TARGET_CHANGE, commit_id: 'ff00aa', description: 'the target' })]
+  function deferred<T>() {
+    let resolve!: (v: T) => void, reject!: (e: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  it('selectRef (full change_id) selects that row off the first load — one log call', async () => {
+    render(App, state({ selectRef: 'cmid' }))
+    await waitFor(() => rows() === 3)
+    await waitFor(() => selectedEntry() === '1')
+    expect(logCalls()).toHaveLength(1)
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  it('selectRef accepts a unique commit_id prefix (short ids agents print)', async () => {
+    render(App, state({ selectRef: 'ktr' }))   // prefix of ktrunk
+    await waitFor(() => rows() === 3)
+    await waitFor(() => selectedEntry() === '2')
+    expect(logCalls()).toHaveLength(1)
+  })
+
+  it('revsetFilter from the URL drives the FIRST log call (no double load)', async () => {
+    render(App, state({ revsetFilter: 'mine()', selectRef: 'cwc' }))
+    await waitFor(() => rows() === 3)
+    await waitFor(() => selectedEntry() === '0')
+    expect(logCalls()).toHaveLength(1)
+    expect(logCalls()[0].args[0]).toBe('mine()')
+  })
+
+  it('(a) miss → widen ONCE via locatorRevset → FOUND: target selected, locator stays, no warning', async () => {
+    setLogHandler(async (revset) => revset === LOCATOR ? withTarget() : defaultFixtures().revisions)
+    render(App, state({ selectRef: TARGET_CHANGE }))
+    await waitFor(() => rows() === 4)
+    await waitFor(() => selectedEntry() === '3')
+    await settle()
+    expect(logRevsets()).toEqual([undefined, LOCATOR])
+    expect(revsetInput()).toBe(LOCATOR)
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  it('(b) first load superseded by a load that CONTAINS the target → no widen, no third call, target selected', async () => {
+    const first = deferred<LogEntry[]>()
+    setLogHandler((revset) => revset === undefined ? first.promise : Promise.resolve(withTarget()))
+    render(App, state({ selectRef: TARGET_CHANGE }))
+    await waitFor(() => logCalls().length === 1)
+    // User submits a revset while load #1 is still in flight → load #2 supersedes it.
+    const input = qs('.revset-input') as HTMLInputElement
+    input.value = 'mine()'
+    await fireEvent.input(input)
+    await fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => rows() === 4)
+    // Load #1 lands late (superseded) WITHOUT the target — must not widen.
+    first.resolve(defaultFixtures().revisions)
+    await waitFor(() => selectedEntry() === '3')
+    await settle()
+    expect(logRevsets()).toEqual([undefined, 'mine()'])
+    expect(revsetInput()).toBe('mine()')
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  it('(c) widen load ERRORS (ambiguous prefix) → previous revset restored, jj error kept, no not-found overwrite', async () => {
+    const AMBIG = '00ff'
+    const loc = `present(${AMBIG}) | present(@) | present(trunk())`
+    setLogHandler(async (revset) => {
+      if (revset === loc) throw new Error(`Commit ID prefix "${AMBIG}" is ambiguous`)
+      return defaultFixtures().revisions
+    })
+    render(App, state({ revsetFilter: 'mine()', selectRef: AMBIG }))
+    await waitFor(() => logCalls().length === 3)
+    await waitFor(() => rows() === 3)
+    await settle()
+    expect(logRevsets()).toEqual(['mine()', loc, 'mine()'])
+    expect(revsetInput()).toBe('mine()')
+    expect(qs('.message-bar.kind-error')?.textContent).toContain('ambiguous')
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+    expect(selectedEntry()).toBe('0') // fell back to @
+  })
+
+  it('(d) miss → widen → still missing: previous revset restored + warning, exactly one widen', async () => {
+    setLogHandler(async () => defaultFixtures().revisions)
+    render(App, state({ revsetFilter: 'mine()', selectRef: 'zzzz' }))
+    await waitFor(() => logCalls().length === 3)
+    await waitFor(() => qs('.message-bar.kind-warning') !== null)
+    await settle()
+    expect(logRevsets()).toEqual(['mine()', 'present(zzzz) | present(@) | present(trunk())', 'mine()'])
+    expect(revsetInput()).toBe('mine()')
+    expect(qs('.message-bar.kind-warning')?.textContent).toContain('zzzz')
+    expect(selectedEntry()).toBe('0')
+  })
+
+  it('(d′) user replaces our locator mid-widen — their revset wins: no restore, no stale warning', async () => {
+    const widen = deferred<LogEntry[]>()
+    const loc = 'present(zzzz) | present(@) | present(trunk())'
+    setLogHandler((revset) => revset === loc ? widen.promise : Promise.resolve(defaultFixtures().revisions))
+    render(App, state({ selectRef: 'zzzz' }))
+    await waitFor(() => logCalls().length === 2) // widen in flight
+    const input = qs('.revset-input') as HTMLInputElement
+    input.value = 'trunk()'
+    await fireEvent.input(input)
+    await fireEvent.keyDown(input, { key: 'Enter' }) // userRevsetSubmit drops the spent slot
+    await waitFor(() => logCalls().length === 3)
+    widen.resolve(defaultFixtures().revisions) // superseded — ignored
+    await waitFor(() => rows() === 3)
+    await settle()
+    expect(logRevsets()).toEqual([undefined, loc, 'trunk()']) // no restore reload
+    expect(revsetInput()).toBe('trunk()')
+    // The locator load never landed, so "not found (also tried …)" would be a
+    // lie about the user's unrelated view — nothing is shown.
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  it('(f) an armed slot that outlives an ERRORED first load never widens over the user\'s next revset', async () => {
+    setLogHandler(async (revset) => {
+      if (revset === 'bad(') throw new Error('syntax error')
+      return defaultFixtures().revisions // no zzzz anywhere
+    })
+    render(App, state({ revsetFilter: 'bad(', selectRef: 'zzzz' }))
+    await waitFor(() => qs('.message-bar.kind-error') !== null)
+    const input = qs('.revset-input') as HTMLInputElement
+    input.value = 'mine()'
+    await fireEvent.input(input)
+    await fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => rows() === 3)
+    await settle()
+    // Demoted to plain: a miss ends silently — no locator load, filter kept.
+    expect(logRevsets()).toEqual(['bad(', 'mine()'])
+    expect(revsetInput()).toBe('mine()')
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  it('(e) ?change=main (a bookmark, not an id) → "use ?revset=" warning, no revset built', async () => {
+    render(App, state({ selectRef: 'main' }))
+    await waitFor(() => rows() === 3)
+    await waitFor(() => qs('.message-bar.kind-warning') !== null)
+    expect(qs('.message-bar.kind-warning')?.textContent).toContain('?revset=')
+    await settle()
+    expect(logRevsets()).toEqual([undefined])
+    expect(revsetInput()).toBe('')
+  })
+
+  it('?path= alone arms a scroll against @ without any extra load', async () => {
+    render(App, state({ selectPath: 'src/main.ts' }))
+    await waitFor(() => rows() === 3)
+    await waitFor(() => selectedEntry() === '0')
+    await settle()
+    expect(logCalls()).toHaveLength(1)
+    expect(qs('.message-bar.kind-warning')).toBeNull()
+  })
+
+  // End-to-end through AppShell: parse location.search → seed → strip.
+  it('AppShell: ?change=<prefix>&revset= selects the row, drives the first log, strips the URL', async () => {
+    history.replaceState(null, '', '/?keep=1&change=cmi&revset=mine()')
+    const { default: AppShell } = await import('./AppShell.svelte')
+    render(AppShell)
+    // Stripped synchronously at boot, unrelated params preserved.
+    expect(location.search).toBe('?keep=1')
+    await waitFor(() => rows() === 3)
+    await waitFor(() => selectedEntry() === '1')
+    expect(logCalls()[0].args[0]).toBe('mine()')
+    history.replaceState(null, '', '/')
+  })
+
+  it('a non-id ref (revset syntax) is never interpolated into a revset — warns without widening', async () => {
+    render(App, state({ selectRef: 'main@origin' }))
+    await waitFor(() => rows() === 3)
+    await waitFor(() => qs('.message-bar.kind-warning') !== null)
+    expect(qs('.message-bar.kind-warning')?.textContent).toContain('?revset=')
+    expect(logCalls()).toHaveLength(1)
   })
 })

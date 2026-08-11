@@ -113,12 +113,20 @@ export function setFixtures(f: Partial<Fixtures>): void {
   _fixtures = { ...defaultFixtures(), ...f }
 }
 
+/** Revset-aware / controllable `api.log` override. Receives the revset arg
+ *  (undefined = default log); return a promise you control (defer, reject) to
+ *  script supersede/error sequences. null → the static `fixtures.revisions`. */
+export type LogHandler = (revset: string | undefined) => Promise<LogEntry[]>
+let _logHandler: LogHandler | null = null
+export function setLogHandler(h: LogHandler | null): void { _logHandler = h }
+
 export function resetMockApi(): void {
   _fixtures = defaultFixtures()
   calls.length = 0
   _seq = 0
   _navCb = null
   _staleCb = null
+  _logHandler = null
 }
 
 const okMutation: MutationResult = { output: '' }
@@ -154,7 +162,7 @@ export const mockApi = new Proxy({} as Record<string, (...args: unknown[]) => Pr
       calls.push({ method, args })
       const a0 = args[0] as string | undefined
       switch (method) {
-        case 'log': return Promise.resolve(_fixtures.revisions)
+        case 'log': return _logHandler ? _logHandler(a0) : Promise.resolve(_fixtures.revisions)
         case 'info': return Promise.resolve(_fixtures.info)
         case 'workspaces': return Promise.resolve(_fixtures.workspaces)
         case 'aliases': return Promise.resolve(_fixtures.aliases)

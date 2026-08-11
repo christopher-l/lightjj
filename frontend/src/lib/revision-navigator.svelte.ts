@@ -105,13 +105,14 @@ export function createRevisionNavigator(opts: {
   // intervening set()/load() and wins. revGen catches it before the call.
   let revGen = 0
 
-  function singleTarget(c: Commit): DiffTarget {
+  function singleTarget(c: Commit): Extract<DiffTarget, { kind: 'single' }> {
     return {
       kind: 'single',
       commitId: c.commit_id,
       changeId: effectiveId(c),
       isWorkingCopy: c.is_working_copy,
       immutable: c.immutable,
+      parentIds: c.parent_ids,
     }
   }
 

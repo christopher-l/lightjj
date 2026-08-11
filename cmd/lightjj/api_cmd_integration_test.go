@@ -59,7 +59,7 @@ func TestAPIPipelineRoundTrip(t *testing.T) {
 	})
 
 	t.Run("POST with JSON body and query string", func(t *testing.T) {
-		sess, err := discoverSession(sessDir, cwd)
+		sess, _, err := discoverSession(sessDir, cwd)
 		require.NoError(t, err)
 		require.Equal(t, addr, sess.Addr, "discovery must return the listener's addr verbatim")
 
@@ -79,7 +79,7 @@ func TestAPIPipelineRoundTrip(t *testing.T) {
 	})
 
 	t.Run("GET with no body has no default Content-Type", func(t *testing.T) {
-		sess, err := discoverSession(sessDir, cwd)
+		sess, _, err := discoverSession(sessDir, cwd)
 		require.NoError(t, err)
 		resp, err := doAPIRequest(sess.Addr, "GET", "/tab/0/api/focus", nil, nil)
 		require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestAPIPipelineRoundTrip(t *testing.T) {
 	})
 
 	t.Run("custom -H header overrides default Content-Type", func(t *testing.T) {
-		sess, err := discoverSession(sessDir, cwd)
+		sess, _, err := discoverSession(sessDir, cwd)
 		require.NoError(t, err)
 		resp, err := doAPIRequest(sess.Addr, "POST", "/api/x", strings.NewReader("raw"),
 			[]string{"Content-Type: text/plain"})
@@ -129,7 +129,7 @@ func TestAPIPipelineStatusMapping(t *testing.T) {
 	writeFakeSession(t, sessDir, sessionInfo{
 		PID: 200, Addr: addr, Mode: "local", RepoDir: repoDir,
 	})
-	sess, err := discoverSession(sessDir, repoDir)
+	sess, _, err := discoverSession(sessDir, repoDir)
 	require.NoError(t, err)
 
 	cases := []struct {

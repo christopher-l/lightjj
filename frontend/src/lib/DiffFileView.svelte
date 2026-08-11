@@ -14,6 +14,7 @@
   import { escapeHtml } from './highlighter'
   import { detectLanguage } from './languages'
   import { symbolTarget, type SymbolHover } from './symbol-hover.svelte'
+  import ImageDiff from './ImageDiff.svelte'
 
   interface Props {
     file: DiffFile
@@ -51,6 +52,18 @@
     previewContent?: string
     /** Commit id for image-src resolution in markdown preview. */
     previewRevision?: string
+    /** Revision whose bytes are the "after" side of a binary-image diff
+     *  (commit_id — immutable-cached by /api/file-raw, and a snapshot mints a
+     *  new one so the view re-keys). undefined = no automatic image view →
+     *  the plain binary placeholder. */
+    imageRevision?: string
+    /** Revision for the "before" side (the parent commit_id; DiffPanel falls
+     *  back to `<commit_id>-` / `roots(revset)-`). undefined = no single
+     *  previous version to compare against → after-only. */
+    imageBaseRevision?: string
+    /** Why there is no before side, when the parent knows up front (merge
+     *  commit) — shown by ImageDiff instead of inferring from a 404. */
+    imageBaseNote?: string
     ondiscard?: (path: string, sourcePath?: string) => void
     onsavefile?: (path: string, content: string) => void
     oncanceledit?: (path: string) => void
@@ -124,7 +137,7 @@
     lines: { lineNum: number | null, content: string, side?: DiffSide }[]
   }
 
-  let { file, fileStats, isCollapsed, bodyDeferred = false, isExpanded, gapMap, splitView, highlightedLines, wordDiffs, ontoggle, onexpand, onmerge, onresolveconflict, searchMatches = [], currentMatchIdx = 0, editing = false, editContent, editBusy = false, onedit, onpreview, previewContent, previewRevision, ondiscard, onsavefile, oncanceledit, onlinecontext, oncontextmenu, onopenfile, onfilehistory, onopendoc, oncompare, annotationsForLine, annotationsForFile, annotationCount = 0, docCommentCount = 0, vis, onreviewresolve, onreviewdelete, composer, draftLine, onannotationclick, onreviewedtoggle, hunkReview = null, symbolHover }: Props = $props()
+  let { file, fileStats, isCollapsed, bodyDeferred = false, isExpanded, gapMap, splitView, highlightedLines, wordDiffs, ontoggle, onexpand, onmerge, onresolveconflict, searchMatches = [], currentMatchIdx = 0, editing = false, editContent, editBusy = false, onedit, onpreview, previewContent, previewRevision, imageRevision, imageBaseRevision, imageBaseNote, ondiscard, onsavefile, oncanceledit, onlinecontext, oncontextmenu, onopenfile, onfilehistory, onopendoc, oncompare, annotationsForLine, annotationsForFile, annotationCount = 0, docCommentCount = 0, vis, onreviewresolve, onreviewdelete, composer, draftLine, onannotationclick, onreviewedtoggle, hunkReview = null, symbolHover }: Props = $props()
 
   const lang = $derived(detectLanguage(file.filePath))
   function handleSymbolMove(e: PointerEvent) {
@@ -199,6 +212,29 @@
   let isMarkdown = $derived(/\.md$/i.test(filePath))
   let isExcalidraw = $derived(/\.excalidraw$/i.test(filePath))
   let isImage = $derived(IMAGE_RE.test(filePath))
+  // Image with no text body to diff: a binary image (png/jpg… — `Binary files
+  // … differ`, 0 hunks) OR a pure rename, which `jj diff --git` emits as ONLY
+  // `rename from/to` lines — no Binary marker, so isBinary is false and the
+  // hunk-less body used to render empty. Rename-with-content-change never
+  // reaches here as R (jj decomposes it to D+A). Drives both the ImageDiff
+  // body and hiding the text-only header actions (Preview/Edit).
+  let imageOnly = $derived(isImage && file.hunks.length === 0 && (file.isBinary || fileStats?.type === 'R'))
+  // Sources wait for fileStats: diff and file-list load independently, and
+  // guessing "both sides" in the undefined window would fire a doomed parent
+  // fetch for an Added image (wasted jj subprocess + a flash of the
+  // unavailable note) before remounting with the right shape. Added has no
+  // before, Deleted no after; R reads the before side at the parser's
+  // sourcePath. A side that still 404s is dropped by ImageDiff's onerror.
+  let imageAfterSrc = $derived(
+    fileStats && fileStats.type !== 'D' && imageRevision ? api.fileRawUrl(imageRevision, filePath) : undefined)
+  let imageBeforeSrc = $derived(
+    fileStats && fileStats.type !== 'A' && imageBaseRevision ? api.fileRawUrl(imageBaseRevision, file.sourcePath ?? filePath) : undefined)
+  // Tri-state: 'pending' = image context provided but stats not loaded yet
+  // (render nothing — not the binary placeholder, which would flash).
+  let imageDiffState = $derived(
+    !imageOnly || !(imageRevision || imageBaseRevision) ? 'off'
+    : !fileStats ? 'pending'
+    : imageAfterSrc || imageBeforeSrc ? 'on' : 'off')
 
   // Gutter marks for the markdown preview. Gated on previewContent so the
   // hunk walk doesn't run on every render of the (much hotter) source view.
@@ -720,7 +756,10 @@
         aria-pressed={reviewed}
       >{reviewed ? '✓' : ''}</button>
     {/if}
-    {#if onpreview && (isMarkdown || isExcalidraw || isImage) && !editing && fileStats?.type !== 'D'}
+    <!-- textless: binary files and hunk-less image entries (pure rename) have
+         no text to Preview/Edit — the automatic ImageDiff body supersedes the
+         click-to-Preview single image (svg with hunks stays text → keeps both). -->
+    {#if onpreview && (isMarkdown || isExcalidraw || isImage) && !editing && !file.isBinary && !imageOnly && fileStats?.type !== 'D'}
       <button class="btn btn-sm" onclick={(e: MouseEvent) => { e.stopPropagation(); onpreview(filePath) }} title={isExcalidraw ? 'Render diagram' : isImage ? 'Render image' : 'Render markdown (mermaid diagrams supported)'}>{previewContent !== undefined ? 'Source' : 'Preview'}</button>
     {/if}
     {#if onopendoc && isMarkdown && !editing && fileStats?.type !== 'D'}
@@ -731,7 +770,7 @@
     {#if onfilehistory && !editing}
       <button class="btn btn-sm" onclick={(e: MouseEvent) => { e.stopPropagation(); onfilehistory(filePath) }} title="View file history (Kaleidoscope-style two-cursor compare)">History</button>
     {/if}
-    {#if onedit && !editing && fileStats?.type !== 'D'}
+    {#if onedit && !editing && !file.isBinary && !imageOnly && fileStats?.type !== 'D'}
       <button class="btn btn-sm" disabled={editBusy} onclick={(e: MouseEvent) => { e.stopPropagation(); onedit(filePath) }} title="Edit this file (switches to split view)">{editBusy ? 'Loading…' : 'Edit'}</button>
     {/if}
     {#if ondiscard && !editing}
@@ -784,7 +823,19 @@
   {#if composer && draftLine?.lineNum === FILE_LEVEL}
     <div class="inline-review-row">{@render composer()}</div>
   {/if}
-  {#if file.isBinary && !isCollapsed}
+  {#if imageDiffState === 'pending' && !isCollapsed}
+    <!-- Image context known but fileStats not yet loaded: render nothing
+         (not the binary placeholder — it would flash before the images). -->
+  {:else if imageDiffState === 'on' && !isCollapsed}
+    <!-- Keyed on the srcs: same-path file across revisions reuses this
+         DiffFileView instance, so ImageDiff's per-image state (dimensions,
+         load errors, slider) must remount rather than leak between commits.
+         Not body-deferred: no line DOM to save, and loading="lazy" inside
+         already keeps offscreen images off the wire. -->
+    {#key `${imageBeforeSrc}|${imageAfterSrc}`}
+      <ImageDiff path={filePath} beforeSrc={imageBeforeSrc} afterSrc={imageAfterSrc} baseNote={imageBaseNote} changeType={fileStats?.type} split={splitView} />
+    {/key}
+  {:else if file.isBinary && !isCollapsed}
     <div class="binary-placeholder placeholder-text">Binary file — not diffable</div>
   {:else if !isCollapsed && bodyDeferred && previewContent === undefined && !editing}
     <!-- Deferred body: estimated-height stand-in until DiffPanel mounts this

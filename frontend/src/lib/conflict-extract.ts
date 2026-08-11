@@ -32,7 +32,12 @@ export interface MergeSides {
    *  this instead of running LCS over the full file, which for a 1400-line
    *  file with three 20-line conflicts is ~2M cells of re-discovering that
    *  the out-of-region lines are identical. 1-indexed, half-open, matches
-   *  ChangeBlock exactly so it drops into blocksToLineSets/planTake. */
+   *  ChangeBlock exactly so it drops into blocksToLineSets/planTake.
+   *  SPLIT-MODEL INVARIANT: ranges index `ours.split('\n')` /
+   *  `theirs.split('\n')` — '' is ONE blank line, a side is never zero
+   *  lines, and every line is either out-of-region (shared) or owned by
+   *  exactly one block. merge-surgery's line-range position model relies on
+   *  this to keep []-vs-[''] distinct after the join to a string. */
   blocks: ChangeBlock[]
 }
 
@@ -190,6 +195,22 @@ export function reconstructSides(raw: string): MergeSides | null {
   // its divider. `=======` doesn't match any marker → treated as content.
   // The end event then fails its sideNum===2 check → null. No explicit check
   // needed.
+
+  // Split-model invariant (see MergeSides.blocks). A side that collected ZERO
+  // lines — the whole file is conflict region(s), this side empty in each, no
+  // trailing newline — joins to '' which consumers split back to [''] (one
+  // blank line) while every block claims 0 lines of it: a phantom line owned
+  // by nobody, so take → take-back gains a line ('X' comes back as 'X\n').
+  // Hand the phantom to the last block (≥1 exists: zero out-of-region lines
+  // ⇒ ≥1 region; all its ranges on this side are [1,1) → last becomes [1,2)).
+  // jj never emits this shape (marker lines are \n-terminated, so a shared
+  // trailing '' always exists); generated fixtures do, and honoring it here is
+  // what lets planTake drop its unfixable doc.length===0 special case.
+  if (blocks.length > 0) {
+    const last = blocks[blocks.length - 1]
+    if (ours.length === 0) last.aTo = 2
+    if (theirs.length === 0) last.bTo = 2
+  }
 
   return {
     base: base.join('\n'),

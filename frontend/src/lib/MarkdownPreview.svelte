@@ -160,7 +160,7 @@
   {#if toc.length > 1}
     {#if tocOpen}
       <nav class="md-toc" aria-label="Table of contents">
-        <button class="md-toc-close" onclick={() => tocOpen = false} title="Hide outline" aria-label="Hide outline">›</button>
+        <button class="close-btn md-toc-close" onclick={() => tocOpen = false} title="Hide outline" aria-label="Hide outline">›</button>
         <div class="md-toc-items" bind:this={tocItemsEl}>
           {#each toc as h}
             <button
@@ -434,22 +434,13 @@
     color: var(--overlay0);
     font-size: var(--fs-xs);
   }
+  /* Shared .close-btn (theme.css); local rules only place it at the ToC's
+     top-right corner. */
   .md-toc-close {
     align-self: flex-end;
     flex-shrink: 0;
-    width: 16px;
-    height: 16px;
     margin: 0 4px 2px 0;
-    padding: 0;
-    background: transparent;
-    border: none;
-    color: var(--overlay0);
-    font-size: var(--fs-md);
-    line-height: 1;
-    cursor: pointer;
-    border-radius: 3px;
   }
-  .md-toc-close:hover { color: var(--text); background: var(--surface0); }
   /* Collapsed-state tab — same sticky+float positioning as the open ToC so
      it doesn't reflow prose when toggled. */
   .md-toc-tab {
