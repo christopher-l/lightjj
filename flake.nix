@@ -36,7 +36,7 @@
               inherit version pnpm;
               fetcherVersion = 3;
               src = "${src}/frontend";
-              hash = "sha256-Ag2RBZB2YLYASHiZ3n3cFxwO+2o3M9w2PwbnOyAD6TU=";
+              hash = "sha256-v/WqSpzFIBf126De8DT1043QCov88imMhcpkhUPUI4s=";
             };
 
             nativeBuildInputs = [
