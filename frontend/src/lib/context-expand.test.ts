@@ -7,7 +7,7 @@ const add = (s: string): DiffLine => ({ type: 'add', content: `+${s}` })
 
 // 10-line file, hunks at lines 3 and 8.
 const original: DiffFile = {
-  header: '', filePath: 'f.txt',
+  header: '', filePath: 'f.txt', isBinary: false,
   hunks: [
     { header: '@@', oldStart: 3, newStart: 3, newCount: 1, lines: [add('C')] },
     { header: '@@', oldStart: 8, newStart: 8, newCount: 1, lines: [add('H')] },
@@ -16,7 +16,7 @@ const original: DiffFile = {
 
 // Full-context: single hunk from line 1, all 10 lines.
 const full: DiffFile = {
-  header: '', filePath: 'f.txt',
+  header: '', filePath: 'f.txt', isBinary: false,
   hunks: [{
     header: '@@', oldStart: 1, newStart: 1, newCount: 10,
     lines: [ctx('a'), ctx('b'), add('C'), ctx('d'), ctx('e'), ctx('f'), ctx('g'), add('H'), ctx('i'), ctx('j')],
@@ -78,11 +78,11 @@ describe('expandGaps', () => {
     // gap line is actually full.newStart, shifting every gutter line number
     // and annotation key by full.newStart - 1.
     const orig: DiffFile = {
-      header: '', filePath: 'big.go',
+      header: '', filePath: 'big.go', isBinary: false,
       hunks: [{ header: '@@', oldStart: 5005, newStart: 5005, newCount: 1, lines: [add('X')] }],
     }
     const fullDeep: DiffFile = {
-      header: '', filePath: 'big.go',
+      header: '', filePath: 'big.go', isBinary: false,
       hunks: [{
         header: '@@', oldStart: 5000, newStart: 5000, newCount: 6,
         lines: [ctx('a'), ctx('b'), ctx('c'), ctx('d'), ctx('e'), add('X')],
@@ -99,14 +99,14 @@ describe('expandGaps', () => {
   // are <20001 lines apart. With a wider separation, full has 2 hunks and
   // sliceContext must walk past the first one.
   const origWide: DiffFile = {
-    header: '', filePath: 'f.go',
+    header: '', filePath: 'f.go', isBinary: false,
     hunks: [
       { header: '@@', oldStart: 3, newStart: 3, newCount: 1, lines: [add('A')] },
       { header: '@@', oldStart: 30000, newStart: 30000, newCount: 1, lines: [add('B')] },
     ],
   }
   const fullWide: DiffFile = {
-    header: '', filePath: 'f.go',
+    header: '', filePath: 'f.go', isBinary: false,
     hunks: [
       { header: '@@', oldStart: 1, newStart: 1, newCount: 5, lines: [ctx('a'), ctx('b'), add('A'), ctx('d'), ctx('e')] },
       { header: '@@', oldStart: 29998, newStart: 29998, newCount: 5, lines: [ctx('w'), ctx('x'), add('B'), ctx('y'), ctx('z')] },
@@ -146,11 +146,11 @@ describe('expandGaps', () => {
     // → covered → merge fires with an empty gap. A future `>=` slip would
     // also pass here but break the straddle test above; this pins the lower edge.
     const orig: DiffFile = {
-      header: '', filePath: 'f.txt',
+      header: '', filePath: 'f.txt', isBinary: false,
       hunks: [{ header: '@@', oldStart: 5, newStart: 5, newCount: 1, lines: [add('X')] }],
     }
     const fullSame: DiffFile = {
-      header: '', filePath: 'f.txt',
+      header: '', filePath: 'f.txt', isBinary: false,
       hunks: [{ header: '@@', oldStart: 5, newStart: 5, newCount: 1, lines: [add('X')] }],
     }
     const r = expandGaps(orig, fullSame, new Set([0]))

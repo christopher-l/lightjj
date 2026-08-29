@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ActiveView } from './keyboard-gate'
   import type { ModeBase, RebaseMode, SquashMode, SplitMode, MegamergeMode } from './modes.svelte'
 
   interface Props {
@@ -9,7 +10,7 @@
     split: SplitMode
     splitFileCount: { selected: number, total: number } | null
     megamerge: MegamergeMode
-    activeView: 'log' | 'branches' | 'merge'
+    activeView: ActiveView
   }
 
   let { statusText, rebase, squash, squashFileCount, split, splitFileCount, megamerge, activeView }: Props = $props()

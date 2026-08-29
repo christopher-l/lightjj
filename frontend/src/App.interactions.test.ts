@@ -422,7 +422,7 @@ describe('App routable-URL initial selection', () => {
   const logCalls = () => calls.filter(c => c.method === 'log')
   const logRevsets = () => logCalls().map(c => c.args[0])
   const state = (over: Record<string, unknown>) => ({ props: { initialState: {
-    selectedId: null, revsetFilter: '', activeView: 'log', diffScrollTop: 0, ...over,
+    selectedId: null, revsetFilter: '', activeView: 'log' as const, diffScrollTop: 0, ...over,
   } } })
   const rows = () => document.querySelectorAll('.graph-row.node-row').length
   const revsetInput = () => (qs('.revset-input') as HTMLInputElement | null)?.value

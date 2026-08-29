@@ -77,8 +77,11 @@
 
   let palette: string[] = $state(Array(GRAPH_COLORS).fill('#888'))
   // Cache key includes epoch — for ghostty themes the --graph-N vars don't
-  // exist until the lazy <style> injection lands, so theme-id alone would
-  // cache the pre-injection default-dark colors permanently.
+  // exist until the lazy ghostty stylesheet injection lands, so theme-id
+  // alone would
+  // cache the pre-injection default-dark colors permanently. (Don't write
+  // a literal style tag in this comment: svelte-check pairs it with the real
+  // closing tag below and swallows both script blocks.)
   let paletteKey: string | undefined
 
   function refreshPalette(key: string) {

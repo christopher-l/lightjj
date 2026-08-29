@@ -6,7 +6,7 @@ import { parseMarkdown, serializeMarkdown, docSchema } from './pm-schema'
 
 const rt = (md: string) => serializeMarkdown(parseMarkdown(md))
 
-function renderToDOM(md: string): DocumentFragment {
+function renderToDOM(md: string): HTMLElement | DocumentFragment {
   const doc = parseMarkdown(md)
   return DOMSerializer.fromSchema(docSchema).serializeFragment(doc.content)
 }

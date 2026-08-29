@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import { EditorView, keymap, lineNumbers, Decoration, type DecorationSet } from '@codemirror/view'
+  import { EditorView, keymap, lineNumbers, Decoration, type DecorationSet, type Command } from '@codemirror/view'
   import { EditorState, StateField, Compartment, type Extension } from '@codemirror/state'
   import { blockCharRange, type BlockSource } from './merge-surgery'
   import type { ChangeBlock } from './merge-diff'
@@ -131,7 +131,7 @@
   let trackerField: StateField<readonly CenterBlock[]> | undefined
 
   const ROW_H = 18  // matches cmTheme .cm-line lineHeight
-  const NO_LINE_MOVES = new Set([moveLineUp, moveLineDown, copyLineUp, copyLineDown])
+  const NO_LINE_MOVES = new Set<Command>([moveLineUp, moveLineDown, copyLineUp, copyLineDown])
   // 40px gives bezier ribbons enough horizontal span to read as curves.
   // 22px compressed them into unreadable vertical smudges.
   const GUTTER_W = 40

@@ -384,6 +384,8 @@
     })
   }
 
+  let parsedDiff = $derived(parseDiffCached(diffContent))
+
   let flatHunks = $derived(
     parsedDiff.flatMap(f => f.hunks.map((_, hi) => ({ path: f.filePath, hunkIdx: hi })))
   )
@@ -707,8 +709,6 @@
     splitView = !splitView
   }
 
-  let parsedDiff = $derived(parseDiffCached(diffContent))
-
   // Aggregate diff stats across all files
   let totalStats = $derived.by(() => {
     let add = 0, del = 0
@@ -742,6 +742,7 @@
     return {
       header: `Conflicted file: ${path}`,
       filePath: path,
+      isBinary: false,
       hunks: [{ header: '@@ conflict @@', oldStart: 1, newStart: 1, newCount: lines.length, lines }],
     }
   }
@@ -1243,6 +1244,7 @@
   // per-LINE cost, but a diff touching many hundreds of files still mounts
   // one header subtree + file-tab button per file — that's what the count
   // guard catches (the original "bundle churn" case).
+  let searchOpen = $state(false)  // declared here: diffHidden below reads it
   let diffHidden = $derived(
     (totalDiffLines > HIDE_DIFF_TOTAL_LINES || parsedDiff.length > HIDE_DIFF_FILE_LIMIT)
     && !forceShowLargeDiff && !searchOpen)
@@ -1524,7 +1526,6 @@
   }
 
   // --- Diff search ---
-  let searchOpen = $state(false)
   let searchQuery = $state('')
   let searchListOpen = $state(true)
   let searchInputEl: HTMLInputElement | undefined = $state(undefined)

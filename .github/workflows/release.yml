@@ -63,6 +63,11 @@ jobs:
         working-directory: frontend
         run: |
           pnpm install --frozen-lockfile
+          # svelte-check is the only type-check in the pipeline: vite build and
+          # vitest both transpile without checking, so without this gate type
+          # errors (and undeclared-name crashes) accumulate silently — 54 did
+          # between v1.7.0 and v1.37.1.
+          pnpm check
           pnpm run build
           # Outputs to ../cmd/lightjj/frontend-dist/ (embedded via //go:embed)
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createMergeController, type MergeControllerDeps, type MergeQueueItem } from './merge-controller.svelte'
-import { api } from './api'
+import { api, type MutationResult } from './api'
 
 vi.mock('./api', async (orig) => {
   const actual = await orig<typeof import('./api')>()
@@ -44,7 +44,7 @@ beforeEach(() => {
   reload.mockClear()
   mockApi.conflicts.mockReset().mockResolvedValue([])
   mockApi.fileShow.mockReset().mockResolvedValue({ content: 'ok' })
-  mockApi.fileWrite.mockReset().mockResolvedValue({ ok: true })
+  mockApi.fileWrite.mockReset().mockResolvedValue({ output: '' })
   mockApi.mergeResolve.mockReset().mockResolvedValue({ output: '', warnings: '' })
   mockApi.edit.mockReset().mockResolvedValue({ output: '', warnings: '' })
 })
@@ -228,7 +228,7 @@ describe('save()', () => {
     mockApi.mergeResolve.mockRejectedValueOnce(
       new Error('501: merge-resolve requires local mode'),
     )
-    const dWrite = deferred<{ ok: boolean }>()
+    const dWrite = deferred<MutationResult>()
     mockApi.fileWrite.mockImplementationOnce(() => dWrite.p)
 
     const mc = createMergeController(deps)
@@ -242,7 +242,7 @@ describe('save()', () => {
     mc.selectFile(item('b.go', 'bbb'))  // supersede AFTER the point of no return
     await flush()
 
-    dWrite.resolve({ ok: true })
+    dWrite.resolve({ output: '' })
     expect(await savePromise).toBe(false)  // superseded — no resolved-add, no reload for it
     // ...but the relocated working copy is reported, never silent:
     expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('working copy moved'))
@@ -262,7 +262,7 @@ describe('save()', () => {
     mc.selectFile(item('a.go'))
     await flush()
 
-    const dWrite = deferred<{ ok: boolean }>()
+    const dWrite = deferred<MutationResult>()
     mockApi.fileWrite.mockImplementationOnce(() => dWrite.p)
     const savePromise = mc.save('fixed')
     await flush()  // withMutation entered, busy=true
@@ -271,7 +271,7 @@ describe('save()', () => {
     mc.selectFile(item('b.go'))  // bumps shared gen
     await flush()
 
-    dWrite.resolve({ ok: true })
+    dWrite.resolve({ output: '' })
     await savePromise
     expect(mc.resolved.has('c_a.go:a.go')).toBe(false)  // stale bounced
     expect(mc.busy).toBe(false)  // selectFile's finally cleared; save's didn't stick

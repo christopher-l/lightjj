@@ -389,7 +389,7 @@
     onError: e => setMessage(errorMessage(e)),
     onWarning: text => setMessage({ kind: 'warning', text }),
     withMutation,
-    reload: () => logSync.refresh(),
+    reload: async () => { await logSync.refresh() },
     getWorkingCopyChangeId: () => workingCopyEntry?.commit.change_id,
   })
 
@@ -401,7 +401,7 @@
 
   function openFileHistory(path: string) {
     fileHistoryPath = path
-    fileHistoryPin = diffTarget?.kind === 'single' ? diffTarget.commitId : null
+    fileHistoryPin = loadedTarget?.kind === 'single' ? loadedTarget.commitId : null
   }
 
   // Doc mode — ProseMirror view of a single .md with range-anchored comments.
@@ -589,6 +589,7 @@
   // ghosttyThemes dep: isThemeDark reads non-reactive module state, so a
   // saved light ghostty theme on reload would compute darkMode=true (?? true
   // fallback) and never re-derive when the chunk lands.
+  let ghosttyThemes = $state<GhosttyTheme[]>([])
   let darkMode = $derived((void ghosttyThemes, isThemeDark(config.theme)))
   const cmdKey = typeof navigator !== 'undefined' && navigator.platform.includes('Mac') ? '⌘' : 'Ctrl+'
 
@@ -598,8 +599,6 @@
   function toggleTheme() {
     config.theme = darkMode ? 'light' : 'dark'
   }
-
-  let ghosttyThemes = $state<GhosttyTheme[]>([])
 
   // Own $derived — keyed only on config.theme + ghosttyThemes so the 493
   // children DON'T rebuild on Space-spam / pullRequests (dynamicCommands deps).
@@ -3069,8 +3068,12 @@
   // yank the user out of half-complete rebase/squash, an unsaved 3-pane
   // resolution, or unsaved doc-mode edits.
   let pendingNavScroll: { changeId: string; path: string } | null = $state(null)
+  // Function, not inline expression: the post-await re-gates below would
+  // otherwise inherit TS's pre-await narrowing of `activeView` and fail to
+  // type-check ("no overlap"). A call reads the live value with its full type.
+  const navigateBlocked = () => inlineMode || mutating || activeView === 'merge' || activeView === 'doc'
   $effect(() => onNavigate(async (p: NavigatePayload) => {
-    if (inlineMode || mutating || activeView === 'merge' || activeView === 'doc') {
+    if (navigateBlocked()) {
       setMessage({ kind: 'warning', text: 'Agent navigate ignored — finish or Esc current mode' })
       return
     }
@@ -3087,7 +3090,7 @@
         if (ann) p = { ...p, file_path: p.file_path ?? ann.filePath, line: p.line ?? ann.lineNum }
       } catch { /* best-effort — proceed with the agent's raw payload */ }
       // Re-gate after the await — user could have entered a mode mid-fetch.
-      if (inlineMode || mutating || activeView === 'merge' || activeView === 'doc') return
+      if (navigateBlocked()) return
     } else if (p.comment_id && p.file_path && !p.change_id) {
       // Doc-comment path: open doc mode on the file and focus the comment in
       // the rail. The top gate already rejected if the user is mid-doc-edit
@@ -3097,7 +3100,7 @@
         const dc = dcs.find(c => c.id === p.comment_id)
         if (dc) {
           // Re-gate after the await.
-          if (inlineMode || mutating || activeView === 'merge' || activeView === 'doc') return
+          if (navigateBlocked()) return
           await switchToDocView(p.file_path)
           // switchToDocView resets docFocusedComment to null on its success
           // path before returning, so this write is the final one. On its
@@ -3109,7 +3112,7 @@
           return // doc-mode navigation is terminal — skip the diff-view path.
         }
       } catch { /* best-effort */ }
-      if (inlineMode || mutating || activeView === 'merge' || activeView === 'doc') return
+      if (navigateBlocked()) return
     }
     pendingNavScroll = null
     switchToLogView()
@@ -3704,7 +3707,7 @@
             {hunkReview}
             selectedFiles={fileSel.set}
             ontogglefile={fileSel.toggle}
-            onfilesaved={() => logSync.refresh()}
+            onfilesaved={async () => { await logSync.refresh() }}
             onjjmutation={withMutation}
             oncontextmenu={showContextMenu}
             onopenfile={editorConfigured ? handleOpenFile : undefined}

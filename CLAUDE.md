@@ -8,6 +8,7 @@ Browser-based UI for Jujutsu (jj) version control. See [docs/ARCHITECTURE.md](do
 go test ./...                                        # Go tests
 go vet ./...                                         # static analysis
 cd frontend && pnpm install && pnpm run build        # build frontend
+cd frontend && pnpm check                            # svelte-check type-check (not run by vite build or vitest — run it before shipping)
 cd frontend && pnpm run bench                        # diff perf benchmarks (see docs/design-notes/diff-perf-benchmarks.md)
 go build -tags embed ./cmd/lightjj                   # build binary (needs frontend build first; no tag = stub)
 
@@ -70,9 +71,10 @@ internal/
 testutil/                  — Go test infrastructure
   mock_runner.go           — MockRunner with Expect(args)/Verify() pattern
 frontend/                  — Svelte 5 SPA (Vite + TypeScript + pnpm)
-  src/testutil/            — mock-api.ts (vi.mock netStubs + builders), wait-for.ts (frame/predicate waits)
+  src/testutil/            — mock-api.ts (vi.mock netStubs + builders), wait-for.ts (frame/predicate waits), node-ambient.d.ts (minimal node:fs/node:path typings for svelte-check — not @types/node)
   src/App.interactions.test.ts — In-process keyboard-gate tests
   src/main.ts              — Vite entry point: mounts AppShell, imports theme.css
+  src/vite-env.d.ts        — `/// <reference types="vite/client" />` so side-effect `.css` imports type-check
   src/AppShell.svelte      — Tab-switch host ({#key activeTabId} remount + state snapshot); owns per-repo workspace info + the tab/workspace ContextMenu
   src/App.svelte           — Main app shell: layout, keyboard routing, state, revset filter bar
   src/lib/
@@ -189,7 +191,7 @@ frontend/                  — Svelte 5 SPA (Vite + TypeScript + pnpm)
 
 **Go**: 3 direct (`fsnotify` for cross-platform fs watch, `tailscale/hujson` for comment-preserving JSONC config edits, `testify` test-only). Don't add more without strong justification.
 
-**Frontend**: CodeMirror/Lezer (editor core, one author), `marked`+`dompurify` (markdown+XSS — don't hand-roll sanitization), `beautiful-mermaid` (lazy-loaded, opt-in), `jsonc-parser` (lazy-loaded, ~30KB gzip — only used by ConfigModal save path), `prosemirror-*` (9 packages, one author, lazy-loaded via doc-mode `await import` — ~31KB gzip), `fast-check` (dev-only, 1 transitive — property tests for data-loss paths). Versions pinned exact (no `^`). `pnpm.onlyBuiltDependencies: ["esbuild"]` allowlists the ONE package permitted to run install scripts — everything else is blocked. Run `pnpm audit` before shipping a dep bump.
+**Frontend**: CodeMirror/Lezer (editor core, one author), `marked`+`dompurify` (markdown+XSS — don't hand-roll sanitization), `beautiful-mermaid` (lazy-loaded, opt-in), `jsonc-parser` (lazy-loaded, ~30KB gzip — only used by ConfigModal save path), `prosemirror-*` (9 packages, one author, lazy-loaded via doc-mode `await import` — ~31KB gzip), `fast-check` (dev-only, 1 transitive — property tests for data-loss paths). Versions pinned exact (no `^`). **`typescript` stays on 6.x** (`pnpm outdated` will nag about 7): svelte-check cannot run against a lone TypeScript 7 install — it needs TS 6 + TS 7 side by side under an npm alias plus `--tsgo`, which is two compilers for one type-check. Vite/vitest don't use `typescript` at all (oxc/esbuild transpile), so nothing else cares. Revisit when svelte-check supports TS 7 alone. `pnpm.onlyBuiltDependencies: ["esbuild"]` allowlists the ONE package permitted to run install scripts — everything else is blocked. Run `pnpm audit` before shipping a dep bump.
 
 ## Code Conventions
 

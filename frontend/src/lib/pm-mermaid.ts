@@ -8,7 +8,7 @@
 // just CSS-hide it while the diagram is shown.
 
 import type { Node } from 'prosemirror-model'
-import type { EditorView, NodeView } from 'prosemirror-view'
+import type { EditorView, NodeView, ViewMutationRecord } from 'prosemirror-view'
 import { ensureMermaidLoaded, tryRenderDiagram, wirePanzoom } from './mermaid'
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string): HTMLElementTagNameMap[K] {
@@ -97,7 +97,7 @@ class MermaidNodeView implements NodeView {
     return e.target === this.toggle
   }
 
-  ignoreMutation(m: MutationRecord): boolean {
+  ignoreMutation(m: ViewMutationRecord): boolean {
     // PM should ignore our SVG injection; only contentDOM mutations matter.
     return !this.contentDOM.contains(m.target as globalThis.Node)
   }
