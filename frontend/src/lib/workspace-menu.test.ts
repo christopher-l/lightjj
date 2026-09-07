@@ -107,18 +107,21 @@ describe('workspaceSectionItems', () => {
 
 describe('tabMenuItems', () => {
   const onCloseTab = vi.fn()
+  const solo = (t: TabInfo) => [t]
 
   it('single-workspace tab: no workspace section, just Close tab', () => {
+    const t = tab('1')
     const items = tabMenuItems({
-      tab: tab('0'), tabCount: 2, groupTabCount: 1, onCloseTab,
+      tab: t, tabCount: 2, groupTabs: solo(t), onCloseTab,
     })
     expect(items.some(i => i.separator)).toBe(false)
     expect(items.map(i => i.label)).toEqual(['Close tab'])
   })
 
   it('prepends the workspace section when the repo has ≥2 workspaces', () => {
+    const t = tab('1', { wsName: 'default' })
     const items = tabMenuItems({
-      tab: tab('0', { wsName: 'default' }), tabCount: 2, groupTabCount: 1,
+      tab: t, tabCount: 2, groupTabs: solo(t),
       section: baseOpts(), onCloseTab,
     })
     expect(items.some(i => i.label === '◇ feature')).toBe(true)
@@ -127,21 +130,50 @@ describe('tabMenuItems', () => {
   })
 
   it('Close tab is disabled when it would close the last tab', () => {
-    const items = tabMenuItems({ tab: tab('0'), tabCount: 1, groupTabCount: 1, onCloseTab })
+    const t = tab('1')
+    const items = tabMenuItems({ tab: t, tabCount: 1, groupTabs: solo(t), onCloseTab })
     expect(items.find(i => i.label === 'Close tab')!.disabled).toBe(true)
   })
 
-  it('Close group only appears for chips (groupTabCount > 1) and is danger', () => {
+  // The launch tab (id 0, the -R repo) is never closeable server-side ("cannot
+  // close the startup tab"); the menu must not offer what the server will 400.
+  it('Close tab is disabled for the launch tab even with other tabs open', () => {
+    const t = tab('0')
+    const items = tabMenuItems({ tab: t, tabCount: 3, groupTabs: solo(t), onCloseTab })
+    expect(items.find(i => i.label?.startsWith('Close tab'))!.disabled).toBe(true)
+  })
+
+  it('Close group only appears for chips (>1 tab in group) and is danger', () => {
     const onCloseGroup = vi.fn()
     const grouped = tabMenuItems({
-      tab: tab('0'), tabCount: 3, groupTabCount: 2, onCloseTab, onCloseGroup,
+      tab: tab('1'), tabCount: 3, groupTabs: [tab('1'), tab('2')], onCloseTab, onCloseGroup,
     })
     const cg = grouped.find(i => i.label === 'Close group (2 tabs)')!
     expect(cg.danger).toBe(true)
     cg.action!()
     expect(onCloseGroup).toHaveBeenCalled()
 
-    const solo = tabMenuItems({ tab: tab('0'), tabCount: 3, groupTabCount: 1, onCloseTab, onCloseGroup })
-    expect(solo.some(i => i.label?.startsWith('Close group'))).toBe(false)
+    const single = tabMenuItems({ tab: tab('1'), tabCount: 3, groupTabs: [tab('1')], onCloseTab, onCloseGroup })
+    expect(single.some(i => i.label?.startsWith('Close group'))).toBe(false)
+  })
+
+  it('Close group counts only closable tabs (launch tab excluded)', () => {
+    const onCloseGroup = vi.fn()
+    // Right-clicked a NON-launch tab in a group that contains the launch tab.
+    const items = tabMenuItems({
+      tab: tab('1'), tabCount: 3, groupTabs: [tab('0'), tab('1')], onCloseTab, onCloseGroup,
+    })
+    expect(items.some(i => i.label === 'Close group (1 tab)')).toBe(true)
+  })
+
+  it('from the launch tab itself: says why Close is disabled + "Close other tabs"', () => {
+    const onCloseGroup = vi.fn()
+    const items = tabMenuItems({
+      tab: tab('0'), tabCount: 3, groupTabs: [tab('1'), tab('0'), tab('2')], onCloseTab, onCloseGroup,
+    })
+    const close = items.find(i => i.label?.startsWith('Close tab'))!
+    expect(close.disabled).toBe(true)
+    expect(close.label).toContain('launch repo')
+    expect(items.some(i => i.label === 'Close other tabs in group (2)')).toBe(true)
   })
 })

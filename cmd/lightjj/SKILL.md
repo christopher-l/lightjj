@@ -116,7 +116,9 @@ others won't-fix, and may post their own. Be a good participant:
 
 When you've made or found a change the user should look at, hand them a URL
 instead of (or as well as) steering with `navigate` — it works even if their
-browser tab is closed. Take the address from `lightjj sessions`:
+browser tab is closed, and it's the fallback when `navigate` returns `409`
+(no browser is viewing the tab you targeted). Take the address from
+`lightjj sessions`:
 
 ```text
 http://127.0.0.1:54321/?change=wqnwkozp

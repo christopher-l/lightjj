@@ -69,7 +69,7 @@
   // state_referenced_locally warning; we DO want the mount-time snapshot.
   const init = untrack(() => initialState)
 
-  import { api, effectiveId, multiRevset, computeConnectedCommitIds, getCached, prefetchRevision, prefetchFilesBatch, onStale, onStaleWC, onPollFail, onSSEState, onNavigate, wireAutoRefresh, clearAllCaches, bookmarkPushFlags, agentBaseURL, type LogEntry, type FileChange, type OpEntry, type EvologEntry, type Workspace, type Alias, type PullRequest, type DiffTarget, type Bookmark, type MutationResult, type StaleImmutableGroup, type NavigatePayload, type TabInfo } from './lib/api'
+  import { api, effectiveId, prLabel, multiRevset, computeConnectedCommitIds, getCached, prefetchRevision, prefetchFilesBatch, onStale, onStaleWC, onPollFail, onSSEState, onNavigate, wireAutoRefresh, clearAllCaches, bookmarkPushFlags, agentBaseURL, type LogEntry, type FileChange, type OpEntry, type EvologEntry, type Workspace, type Alias, type PullRequest, type DiffTarget, type Bookmark, type MutationResult, type StaleImmutableGroup, type NavigatePayload, type TabInfo } from './lib/api'
   import { groupTabs } from './lib/tab-groups'
   import { changeLink, findRevisionIndexByRef, isRevisionIdLike, locatorRevset } from './lib/url-intent'
   import { setDetectedJJVersion, missingJJFeatures } from './lib/jj-features.svelte'
@@ -260,9 +260,9 @@
   // after merge, or the bookmark only exists @origin). Without present(),
   // one missing bookmark → "Revision X doesn't exist" → whole chip errors.
   const prsRevset = $derived.by(() =>
-    pullRequests.length === 0
+    myPullRequests.length === 0
       ? ''
-      : `ancestors(${pullRequests.map(p => `present(${revsetQuote(p.bookmark)})`).join(' | ')}, 3) | @`
+      : `ancestors(${myPullRequests.map(p => `present(${revsetQuote(p.bookmark)})`).join(' | ')}, 3) | @`
   )
 
   // Label for RevisionGraph's header badge. null = default log (no badge).
@@ -538,7 +538,11 @@
   let aliases = $derived(aliasesLoader.value)
   const prs = createLoader(() => api.pullRequests(), [] as PullRequest[], undefined, { keepValueOnError: true })
   let pullRequests = $derived(prs.value)
+  // Badges + Create-PR eligibility key on EVERY open PR (yours and same-repo
+  // colleagues'); the "PRs" chip/revset/palette aggregate only your own —
+  // otherwise a busy repo's recent-PRs window would swamp the count.
   let prByBookmark = $derived(new Map(pullRequests.map(pr => [pr.bookmark, pr])))
+  let myPullRequests = $derived(pullRequests.filter(pr => pr.mine))
 
   let contextMenu: { items: ContextMenuItem[]; x: number; y: number } | null = $state(null)
   const showContextMenu = (items: ContextMenuItem[], x: number, y: number) => {
@@ -880,10 +884,10 @@
     // guards an open FileEditor's buffer (unified unmounts the editor); a direct
     // config.splitView write would bypass that and silently discard edits. No
     // DiffPanel (branches/merge view) → nothing can be editing → plain toggle.
-    { label: 'Toggle split/unified diff', category: 'View', action: () => {
+    { label: 'Toggle split/unified diff', shortcut: '|', category: 'View', action: () => {
       if (diffPanelRef) diffPanelRef.toggleSplitView()
       else config.splitView = !config.splitView
-    } },
+    }, when: () => !fileHistoryPath },
     { label: 'Toggle operation log', shortcut: 'O', category: 'View', action: toggleOplog },
     { label: 'Toggle evolution log', shortcut: 'E', category: 'View', action: toggleEvolog, when: () => !!selectedRevision },
     // Help — showInCheatsheet lets shortcut-less entries appear in the empty-query grid
@@ -932,7 +936,7 @@
     { label: `Font size: increase (${config.fontSize}px)`, category: 'View', action: () => { config.fontSize += 1 }, when: () => config.fontSize < FONT_SIZE_MAX },
     { label: `Font size: decrease (${config.fontSize}px)`, category: 'View', action: () => { config.fontSize -= 1 }, when: () => config.fontSize > FONT_SIZE_MIN },
     { label: 'Font size: reset', category: 'View', action: () => { config.fontSize = FONT_SIZE_DEFAULT }, when: () => config.fontSize !== FONT_SIZE_DEFAULT },
-    { label: `View: Open PRs (${pullRequests.length})`, hint: prsRevset, category: 'Navigation', action: () => applyRevsetExample(prsRevset), when: () => pullRequests.length > 0 },
+    { label: `View: My open PRs (${myPullRequests.length})`, hint: prsRevset, category: 'Navigation', action: () => applyRevsetExample(prsRevset), when: () => myPullRequests.length > 0 },
   ])
 
   // "Switch to repo: <name>" — one per distinct open repo group (issue #30
@@ -1435,6 +1439,17 @@
     return idx >= 0
   }
 
+  /** Select by a user/agent-supplied REF (unique prefix or full-length id —
+   *  same matcher as `?change=`), vs selectByChangeId's exact effectiveId for
+   *  ids the UI itself produced. Returns the matched row (callers stamp its
+   *  effectiveId, not the ref) or null. */
+  function selectByRef(ref: string): LogEntry | null {
+    const idx = findRevisionIndexByRef(revisions, ref)
+    if (idx < 0) return null
+    selectRevision(idx)
+    return revisions[idx]
+  }
+
   /** Deferred-selection slot, consumed ONLY by loadLog's reconciliation of an
    *  APPLIED load (superseded/errored loads never reach it — so supersedes are
    *  race-free by construction: whichever load actually lands consumes it).
@@ -1538,9 +1553,18 @@
   // bookmark name (domain object); App builds the items (CLAUDE.md "Adding a
   // context-menu surface"). Create PR… appears only for eligible (pushed,
   // PR-less, GitHub) bookmarks — createPRBookmarks already encodes that.
+  /** "Open PR #N ↗" menu item for a bookmark with an open PR, else null. A
+   *  non-badge path to the PR (the badge is a small click target). */
+  function openPRItem(name: string): ContextMenuItem | null {
+    const pr = prByBookmark.get(name)
+    return pr ? { label: `Open ${prLabel(pr)} ↗`, action: () => window.open(pr.url, '_blank', 'noopener') } : null
+  }
+
   function openRevisionBookmarkContextMenu(name: string, x: number, y: number) {
     const items: ContextMenuItem[] = []
-    if (createPRBookmarks.has(name)) {
+    const openPR = openPRItem(name)
+    if (openPR) items.push(openPR)
+    else if (createPRBookmarks.has(name)) {
       items.push({ label: 'Create PR…', action: () => createPR(name) })
     }
     items.push({ label: `Copy name (${name})`, action: () => navigator.clipboard.writeText(name) })
@@ -1565,7 +1589,10 @@
     // already-PR'd branch has no sensible compare URL, and the menu already
     // carries many items. Placed near the top — it's a common next-step after
     // pushing a new branch.
-    if (githubRepo && canCreatePR(bookmarkCreatePREligibility(bm, prByBookmark))) {
+    const openPR = openPRItem(bm.name)
+    if (openPR) {
+      items.push(openPR, { separator: true })
+    } else if (githubRepo && canCreatePR(bookmarkCreatePREligibility(bm, prByBookmark))) {
       items.push(
         { label: 'Create PR…', action: () => createPR(bm.name) },
         { separator: true },
@@ -3027,6 +3054,9 @@
       case '}': e.preventDefault(); if (diffPanelRef?.stepAnnotation(1) === false) setMessage({ kind: 'warning', text: 'No annotations on this revision' }); break
       case '{': e.preventDefault(); if (diffPanelRef?.stepAnnotation(-1) === false) setMessage({ kind: 'warning', text: 'No annotations on this revision' }); break
       case 'C': e.preventDefault(); diffPanelRef?.cycleVisibility(); break
+      // '|' = split/unified everywhere (here via DiffPanel's editor-buffer
+      // guard; FileHistoryPanel/FileComparePicker handle it locally).
+      case '|': e.preventDefault(); diffPanelRef?.toggleSplitView(); break
       case 'm': e.preventDefault(); diffPanelRef?.togglePreviewActive(); break
       case 'E': e.preventDefault(); switchToLogView(); toggleEvolog(); break
       case 'O': e.preventDefault(); switchToLogView(); toggleOplog(); break
@@ -3117,15 +3147,19 @@
     pendingNavScroll = null
     switchToLogView()
     if (p.change_id) {
-      if (!selectByChangeId(p.change_id)) {
+      // Agents send whatever `jj log` printed (8-char prefix, 12-char short,
+      // 32-char full) — a ref, not necessarily our exact short id.
+      const row = selectByRef(p.change_id)
+      if (!row) {
         setMessage({ kind: 'warning', text: `Agent navigate: ${p.change_id} not in current revset` })
         return
       }
       // Defer file scroll until that revision's diff is the loadedTarget. The
       // effect below identity-checks changeId so a user j/k between now and
-      // diff-load (or selectByChangeId being a no-op for already-selected)
-      // doesn't apply the scroll to the wrong diff.
-      if (p.file_path) pendingNavScroll = { changeId: p.change_id, path: p.file_path }
+      // diff-load (or selectRevision being a no-op for already-selected)
+      // doesn't apply the scroll to the wrong diff. Stamp the ROW's id, not
+      // the agent's ref — the effect compares against effectiveId/lt.changeId.
+      if (p.file_path) pendingNavScroll = { changeId: effectiveId(row.commit), path: p.file_path }
     } else if (p.file_path) {
       // No change_id → scroll within whatever's currently shown; no async wait.
       diffPanelRef?.scrollToFile(p.file_path)
@@ -3136,8 +3170,8 @@
     // User navigated away from the agent's target → drop the pending scroll
     // rather than fire it whenever they happen to return. Distinguishes from
     // "loadedTarget hasn't caught up yet" (cursor matches, lt doesn't).
-    // effectiveId — selectByChangeId matched via effectiveId (commit_id for
-    // divergent), so pendingNavScroll.changeId may be a commit_id; raw
+    // effectiveId — pendingNavScroll.changeId is the matched row's
+    // effectiveId (commit_id for divergent); raw
     // change_id comparison would never match for divergent targets.
     if (!selectedRevision || effectiveId(selectedRevision.commit) !== pendingNavScroll.changeId) {
       pendingNavScroll = null
@@ -3454,8 +3488,8 @@
             {#each STATIC_PRESETS as p (p.key)}
               {@render chip(p.revset, p.label, p.desc)}
             {/each}
-            {#if pullRequests.length > 0}
-              {@render chip(prsRevset, 'PRs', 'Open pull requests and their stacks', pullRequests.length)}
+            {#if myPullRequests.length > 0}
+              {@render chip(prsRevset, 'PRs', 'My open pull requests and their stacks', myPullRequests.length)}
             {/if}
           </div>
           <RevisionGraph

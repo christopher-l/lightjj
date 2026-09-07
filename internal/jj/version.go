@@ -28,7 +28,19 @@ var (
 	// POST /api/index-paths; the frontend gates the "load full history"
 	// affordance on it.
 	ChangedPathIndex = Semver{0, 30}
+
+	// CommitIdRevsetFn: the `commit_id(prefix)` / `change_id(prefix)` revset
+	// functions, which resolve a hex prefix AS a commit id regardless of a
+	// same-named tag/bookmark (jj resolves bare symbols tag → bookmark → id).
+	// handleFileRaw wraps content-addressed revisions in it so the immutable
+	// cache can't be pointed at a movable ref's bytes. Backend-only gate.
+	CommitIdRevsetFn = Semver{0, 31}
 )
+
+// CommitIdRevset pins `hex` to commit-id resolution — `commit_id(hex)` — so a
+// tag or bookmark that happens to be named like a hex prefix can't shadow it.
+// Callers gate on CommitIdRevsetFn and pass the bare symbol on older jj.
+func CommitIdRevset(hex string) string { return "commit_id(" + hex + ")" }
 
 // FeatureGates is the wire-facing gate registry: GET /api/info resolves every
 // entry through Server.jjSupports (PESSIMISTIC — unknown version reports

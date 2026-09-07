@@ -199,7 +199,7 @@ Tab routes are host-level (registered by `TabManager` in `tabs.go`, not in `rout
 | GET | `/api/info` | Hostname, repo path, mode, default remote, jj version, feature booleans (`features` map — backend-resolved jj capability gates) |
 | GET | `/api/aliases` | User-configured jj aliases |
 | POST | `/api/alias` | Run a configured alias (validated against config; streamed output) |
-| GET | `/api/pull-requests` | Open PR info per bookmark via `gh` |
+| GET | `/api/pull-requests` | Open PR info per bookmark via `gh` (own `@me` set ∪ recent same-repo PRs; `mine` flag) |
 | GET | `/api/github-repo` | Resolved `owner/repo` for building PR-compare URLs (empty if not GitHub) |
 | GET | `/api/symbol` | rg-backed symbol definition lookup |
 
@@ -210,7 +210,7 @@ Tab routes are host-level (registered by `TabManager` in `tabs.go`, not in `rout
 | GET | `/api` | Discovery index pointing at docs + capabilities |
 | GET | `/api/agent` | Embedded agent API documentation (markdown) |
 | GET | `/api/capabilities` | API version + registered action list |
-| POST | `/api/navigate` | Broadcast navigation hint to connected UIs (via SSE) |
+| POST | `/api/navigate` | Broadcast navigation hint to connected UIs (via SSE); 409 when no browser views this tab |
 | GET | `/api/focus` | Last view reported by the frontend |
 | POST | `/api/focus` | Frontend reports its current view |
 

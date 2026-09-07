@@ -263,11 +263,70 @@ describe('App.svelte interactions', () => {
     await waitFor(() => selectedEntry() === '1')
   })
 
+  // Agents send whatever `jj log` printed — a unique prefix must land the same
+  // as the exact short id (same matcher as ?change= URLs). 'cm' uniquely
+  // prefixes 'cmid' among cwc/cmid/ctrunk.
+  it('agent navigate accepts a unique change_id prefix', async () => {
+    await mountApp()
+    triggerNavigate({ change_id: 'cm' })
+    await waitFor(() => selectedEntry() === '1')
+    expect(qs('.message-text')?.textContent ?? '').not.toContain('not in current revset')
+  })
+
+  // The load-bearing half: pendingNavScroll must be stamped with the matched
+  // ROW's id, not the agent's ref — else the scroll effect's identity check
+  // (effectiveId(selected) === pending.changeId) never matches and the file
+  // scroll is silently dropped for every non-exact ref.
+  it('agent navigate by prefix WITH file_path scrolls that file into view', async () => {
+    setFixtures({ diffs: { kwc: '', ktrunk: '', kmid: [
+      'diff --git a/src/main.ts b/src/main.ts',
+      '--- a/src/main.ts', '+++ b/src/main.ts',
+      '@@ -1,1 +1,1 @@', '-a', '+b', '',
+    ].join('\n') } })
+    const spy = vi.spyOn(Element.prototype, 'scrollIntoView')
+    try {
+      await mountApp()
+      triggerNavigate({ change_id: 'cm', file_path: 'src/main.ts' })
+      await waitFor(() => selectedEntry() === '1')
+      await waitFor(() => spy.mock.contexts.some(
+        el => (el as Element).getAttribute?.('data-file-path') === 'src/main.ts'))
+    } finally { spy.mockRestore() }
+  })
+
+  // Bidirectional matcher: a ref LONGER than the row's short id (what
+  // `jj log -T change_id` prints) resolves via "row id is a prefix of ref".
+  it('agent navigate accepts a full-length id longer than the row\'s short id', async () => {
+    await mountApp()
+    triggerNavigate({ change_id: 'cmidqklmnopqrstuvwxyzklmnopqrstu' })
+    await waitFor(() => selectedEntry() === '1')
+  })
+
   it("agent navigate to a change_id not in the revset shows 'not in current revset'", async () => {
     await mountApp()
     triggerNavigate({ change_id: 'cnonexistent' })
     await waitFor(() => qs('.message-text')?.textContent?.includes('not in current revset') === true)
     expect(selectedEntry()).toBe('0')
+  })
+
+  // /api/pull-requests now returns colleagues' same-repo PRs too (mine:false)
+  // so their branches badge; the "PRs" chip must still count only YOUR PRs or
+  // a busy repo's recent window swamps it.
+  it('PRs chip counts only mine; a colleague\'s PR still badges its local bookmark', async () => {
+    const f = defaultFixtures()
+    f.revisions[1].bookmarks = [{ name: 'them/b' }]
+    setFixtures({ revisions: f.revisions, pullRequests: [
+      { bookmark: 'me/a', url: 'https://github.com/o/r/pull/1', number: 1, is_draft: false, mine: true },
+      { bookmark: 'them/b', url: 'https://github.com/o/r/pull/2', number: 2, is_draft: false, mine: false, author: 'bob' },
+      { bookmark: 'them/c', url: 'https://github.com/o/r/pull/3', number: 3, is_draft: true, mine: false },
+    ] })
+    await mountApp()
+    await waitFor(() => qs('.preset-chip .chip-count') !== null)
+    expect(qs('.preset-chip .chip-count')!.textContent).toBe('1')
+    // …while bob's PR #2 badges the row carrying local bookmark them/b.
+    await waitFor(() => qs('.graph-row[data-entry="1"] .pr-badge') !== null)
+    const badge = qs('.graph-row[data-entry="1"] .pr-badge') as HTMLAnchorElement
+    expect(badge.getAttribute('href')).toBe('https://github.com/o/r/pull/2')
+    expect(badge.title).toContain('PR #2 by bob')
   })
 })
 

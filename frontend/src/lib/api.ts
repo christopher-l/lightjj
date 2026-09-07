@@ -907,6 +907,19 @@ export interface PullRequest {
   url: string
   number: number
   is_draft: boolean
+  /** Authored by the gh-authenticated user. Aggregates ("PRs" chip count +
+   *  revset, palette entry) count only these; per-bookmark badges and
+   *  Create-PR eligibility use every entry (a colleague's open PR on a branch
+   *  you have locally still badges, and still suppresses "Create PR…"). */
+  mine: boolean
+  /** GitHub login of the author; surfaced on non-mine badges ("by bob"). */
+  author?: string
+}
+
+/** Tooltip/label prefix for a PR: "Draft PR #7 by bob" / "PR #12". Non-mine
+ *  PRs name their author so a colleague's badge is visibly not yours. */
+export function prLabel(pr: PullRequest): string {
+  return `${pr.is_draft ? 'Draft ' : ''}PR #${pr.number}${!pr.mine && pr.author ? ` by ${pr.author}` : ''}`
 }
 
 export interface SymbolHit {

@@ -1,11 +1,13 @@
 <script lang="ts">
   import { api, type LogEntry } from './api'
+  import { config } from './config.svelte'
   import { createLoader, DIFF_LOAD_DEBOUNCE_MS } from './loader.svelte'
   import { parseDiffContent } from './diff-parser'
   import { relativeTime, firstLine } from './time-format'
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import FileHistoryRail from './FileHistoryRail.svelte'
   import DiffFileView from './DiffFileView.svelte'
+  import SplitToggle from './SplitToggle.svelte'
 
   interface Props {
     path: string
@@ -20,13 +22,18 @@
   let selectedIndex = $state(0)
   let railRef: FileHistoryRail | undefined = $state()
   let rootEl: HTMLElement | undefined = $state()
+  // Panel-local, seeded from the global choice — see FileHistoryPanel for why
+  // this must never write config.splitView (DiffPanel's editor-buffer guard).
+  let splitView = $state(untrack(() => config.splitView))
 
   // Auto-focus so j/k reach our onkeydown instead of App's global handler
   // (which navigates the main graph → reset effect → picker closes).
   $effect(() => { if (rootEl) tick().then(() => rootEl?.focus()) })
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return // App's router filters these for the panel path; we self-handle
     if (railRef?.handleKeydown(e)) { e.preventDefault(); e.stopPropagation(); return }
+    if (e.key === '|') { splitView = !splitView; e.preventDefault(); e.stopPropagation(); return }
     if (e.key === 'Escape') { onclose(); e.stopPropagation() }
   }
 
@@ -61,7 +68,10 @@
 <div class="fcp-root" bind:this={rootEl} role="dialog" aria-label="Compare file against another revision" tabindex="-1" onkeydown={handleKeydown}>
   <div class="fcp-header">
     <span class="fcp-title">Compare <code>{path}</code> against…</span>
-    <button class="close-btn" onclick={onclose} title="Close (Esc)">✕</button>
+    <span class="panel-actions">
+      <SplitToggle split={splitView} onclick={() => splitView = !splitView} hint="|" />
+      <button class="close-btn" onclick={onclose} title="Close (Esc)">✕</button>
+    </span>
   </div>
   <div class="fcp-body">
     <FileHistoryRail bind:this={railRef} {path} bind:revisions bind:selectedIndex />
@@ -89,7 +99,7 @@
               fileStats={undefined}
               isCollapsed={false}
               isExpanded={false}
-              splitView={false}
+              {splitView}
               highlightedLines={EMPTY_HL}
               wordDiffs={EMPTY_WD}
               ontoggle={() => {}}

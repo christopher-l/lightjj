@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { api, type LogEntry } from './api'
   import { createLoader } from './loader.svelte'
   import { relativeTime, firstLine } from './time-format'
@@ -36,8 +37,24 @@
     ([p, f]: [string, boolean]) => api.fileHistory(p, f),
     [] as LogEntry[],
   )
-  $effect(() => { history.load([path, full]) })
-  $effect(() => { revisions = history.value })
+  // startFull: skip the mutable tier ENTIRELY — don't race it against
+  // loadFull(). FileHistoryPanel latches an unresolved pin onto the FIRST
+  // non-empty list's row 0; if the mutable tier landed first, an initialPin
+  // outside WIP would be discarded before the full list ever arrived.
+  $effect(() => { if (startFull && !full) return; history.load([path, full]) })
+  // List swap (mutable → full, or a refetch) re-binds a raw index to whatever
+  // row lands there. Carry the cursor across by commit_id (CLAUDE.md: key
+  // selection by identity, derive the index); untrack so this effect depends
+  // only on history.value, not on the outputs it writes.
+  $effect(() => {
+    const next = history.value
+    const prevId = untrack(() => revisions[selectedIndex]?.commit.commit_id)
+    revisions = next
+    selectedIndex = Math.max(0, next.findIndex(r => r.commit.commit_id === prevId))
+    // Carried row may sit far down a long full list — keep it on screen.
+    // (Render effects flush before this user effect, so the row exists.)
+    if (next.length > 0) scrollTo(untrack(() => selectedIndex))
+  })
   $effect(() => { if (startFull) loadFull() })
 
   let sparse = $derived(!full && !history.loading && history.value.length < 5)
@@ -110,7 +127,7 @@
     <div class="fh-empty fh-error">{history.error}</div>
   {:else if history.value.length === 0}
     <div class="fh-empty">
-      No mutable revisions touch this file.
+      {full ? 'No revisions touch this file.' : 'No mutable revisions touch this file.'}
       {#if !full}<br><button class="fh-load-full" onclick={loadFull}>Load full history</button>{/if}
     </div>
   {:else}

@@ -19,6 +19,13 @@ export interface TabGroup {
   tabs: TabInfo[]
 }
 
+/** Tab 0 is the launch repo (the `-R` flag): api.ts's basePath defaults to
+ *  it and the backend refuses to close it ("cannot close the startup tab").
+ *  Every close affordance (TabBar ✕, tab menu Close tab / Close group) gates
+ *  on isClosableTab so the UI never offers what the server will 400. */
+export const LAUNCH_TAB_ID = '0'
+export const isClosableTab = (t: Pick<TabInfo, 'id'>): boolean => t.id !== LAUNCH_TAB_ID
+
 // Stable non-negative hash → --graph-{0..7}. Collision-tolerant: color is a
 // hint, chip text is the identity. >>> 0 keeps it unsigned so % is positive.
 export function colorFor(s: string): number {

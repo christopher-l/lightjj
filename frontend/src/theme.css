@@ -383,6 +383,13 @@ body {
   letter-spacing: 0.05em;
   color: var(--subtext1);
 }
+/* Right-aligned button cluster inside a panel/overlay header (was 5× copy-paste:
+   Evolog/Oplog/RevisionHeader/FileHistoryPanel/FileComparePicker). */
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* Modal chrome — backdrop, container, header. GitModal/BookmarkModal were
    byte-identical; CommandPalette/WelcomeModal/BookmarkInput override

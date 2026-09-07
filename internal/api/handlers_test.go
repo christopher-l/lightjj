@@ -2861,16 +2861,43 @@ func TestHandleFileRaw_SVG_CSPNeutersScript(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Content-Security-Policy"), "default-src 'none'")
 }
 
+// ≥0.31: a hex (content-addressed) revision is resolved via commit_id(…) so a
+// tag/bookmark named like a hex prefix can't shadow it and get its MOVABLE
+// bytes pinned under the immutable cache. Non-hex revisions pass through bare.
+func TestHandleFileRaw_HexPinnedToCommitId(t *testing.T) {
+	runner := testutil.NewMockRunner(t)
+	runner.Expect(jj.FileShow("commit_id(a1b2c3d4e5f6)", "x.png", false)).SetOutput([]byte("png"))
+	runner.Expect(jj.FileShow("main", "x.png", false)).SetOutput([]byte("png"))
+	defer runner.Verify()
+	srv := withJJ(newTestServer(runner), jj.CommitIdRevsetFn)
+
+	w := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/file-raw?revision=a1b2c3d4e5f6&path=x.png", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Cache-Control"), "immutable")
+
+	w = httptest.NewRecorder()
+	srv.Mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/file-raw?revision=main&path=x.png", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("Cache-Control"))
+}
+
+// <0.31 fallback (newTestServer defaults below the gate? no — 0.39; force old).
 func TestHandleFileRaw_CacheControl(t *testing.T) {
-	srv := newTestServer(testutil.NewMockRunner(t))
+	srv := withJJ(newTestServer(testutil.NewMockRunner(t)), jj.Semver{0, 30})
 	for _, tt := range []struct {
 		name, rev string
 		cached    bool
 	}{
 		{"commit_id", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", true},
+		// Commit.commit_id / parent_ids are commit_id.short() = 12 hex — what
+		// DiffPanel actually passes as imageRevision/imageBaseRevision.
+		{"short commit_id (12)", "a1b2c3d4e5f6", true},
 		{"symbolic @", "@", false},
 		{"bookmark", "main", false},
-		{"short hex", "a1b2c3", false},
+		// 12-char change_id (z–k alphabet) is not hex → moves, so no cache.
+		{"change_id", "kxrsownzvtqp", false},
+		{"too-short hex", "a1b2c3", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := testutil.NewMockRunner(t)
@@ -3273,10 +3300,16 @@ func prTestServer(t *testing.T, runner *testutil.MockRunner, remoteURL string) *
 }
 
 func TestHandlePullRequests(t *testing.T) {
-	ghJSON := `[{"headRefName":"alice/feature-x","url":"https://github.com/org/repo/pull/123","number":123,"isDraft":false},{"headRefName":"alice/wip","url":"https://github.com/org/repo/pull/42","number":42,"isDraft":true}]`
+	// @me shape: the user's own two PRs.
+	mineJSON := `[{"headRefName":"alice/feature-x","url":"https://github.com/org/repo/pull/123","number":123,"isDraft":false},{"headRefName":"alice/wip","url":"https://github.com/org/repo/pull/42","number":42,"isDraft":true}]`
+	// recent (all-authors) shape: overlaps #123 (dedupe by number), adds a colleague's
+	// same-repo PR #7, and a stranger's FORK PR whose head is "main" — dropped
+	// so it can't false-badge the local `main` bookmark.
+	othersJSON := `[{"headRefName":"alice/feature-x","url":"https://github.com/org/repo/pull/123","number":123,"isDraft":false},{"headRefName":"bob/refactor","url":"https://github.com/org/repo/pull/7","number":7,"isDraft":false,"isCrossRepository":false,"author":{"login":"bob"}},{"headRefName":"main","url":"https://github.com/org/repo/pull/99","number":99,"isDraft":false,"isCrossRepository":true}]`
 
 	runner := testutil.NewMockRunner(t)
-	runner.Expect(ghPRListArgs("org/repo")).SetOutput([]byte(ghJSON))
+	runner.Expect(ghPRListArgs("org/repo", true)).SetOutput([]byte(mineJSON))
+	runner.Expect(ghPRListArgs("org/repo", false)).SetOutput([]byte(othersJSON))
 	defer runner.Verify()
 	srv := prTestServer(t, runner, "git@github.com:org/repo.git")
 
@@ -3287,19 +3320,95 @@ func TestHandlePullRequests(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	var prs []PullRequest
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&prs))
-	assert.Len(t, prs, 2)
-	assert.Equal(t, "alice/feature-x", prs[0].Bookmark)
-	assert.Equal(t, 123, prs[0].Number)
-	assert.False(t, prs[0].IsDraft)
-	assert.Equal(t, "alice/wip", prs[1].Bookmark)
-	assert.Equal(t, 42, prs[1].Number)
-	assert.True(t, prs[1].IsDraft)
+	require.Len(t, prs, 3)
+	assert.Equal(t, PullRequest{Bookmark: "alice/feature-x", URL: "https://github.com/org/repo/pull/123", Number: 123, Mine: true}, prs[0])
+	assert.Equal(t, PullRequest{Bookmark: "alice/wip", URL: "https://github.com/org/repo/pull/42", Number: 42, IsDraft: true, Mine: true}, prs[1])
+	assert.Equal(t, PullRequest{Bookmark: "bob/refactor", URL: "https://github.com/org/repo/pull/7", Number: 7, Author: "bob"}, prs[2])
+}
+
+func TestMergePRLists(t *testing.T) {
+	gh := func(n int, head, url string, cross bool, login string) ghPR {
+		g := ghPR{Number: n, HeadRefName: head, URL: url, IsCrossRepository: cross}
+		g.Author.Login = login
+		return g
+	}
+	const u = "https://github.com/o/r/pull/"
+	t.Run("both nil → empty slice, not nil (JSON [])", func(t *testing.T) {
+		got := mergePRLists(nil, nil)
+		require.NotNil(t, got)
+		assert.Empty(t, got)
+	})
+	t.Run("mine first, dedupe by number, others' cross-repo dropped, own cross-repo kept", func(t *testing.T) {
+		mine := []ghPR{gh(1, "me/a", u+"1", true, "me")} // own fork PR — kept
+		others := []ghPR{
+			gh(1, "me/a", u+"1", true, "me"),      // dup
+			gh(2, "bob/b", u+"2", false, "bob"),   // kept, mine=false
+			gh(3, "main", u+"3", true, "mallory"), // stranger's fork PR — dropped
+		}
+		got := mergePRLists(mine, others)
+		require.Len(t, got, 2)
+		assert.Equal(t, PullRequest{Bookmark: "me/a", URL: u + "1", Number: 1, Mine: true, Author: "me"}, got[0])
+		assert.Equal(t, PullRequest{Bookmark: "bob/b", URL: u + "2", Number: 2, Author: "bob"}, got[1])
+	})
+	t.Run("non-GitHub URL dropped at the trust boundary", func(t *testing.T) {
+		got := mergePRLists(
+			[]ghPR{gh(1, "me/a", "javascript:alert(1)", false, "me")},
+			[]ghPR{gh(2, "bob/b", "http://evil.example/2", false, "bob")},
+		)
+		assert.Empty(t, got)
+	})
+}
+
+func TestGhPRListArgs(t *testing.T) {
+	mine := ghPRListArgs("o/r", true)
+	assert.Contains(t, strings.Join(mine, " "), "--author @me")
+	others := ghPRListArgs("o/r", false)
+	assert.NotContains(t, others, "--author")
+	for _, a := range [][]string{mine, others} {
+		assert.Equal(t, []string{"gh", "pr", "list", "--repo", "o/r"}, a[:5])
+		assert.Contains(t, strings.Join(a, " "), "isCrossRepository")
+	}
+}
+
+// The all-authors leg is a bonus: it failing (rate limit, flaky network)
+// degrades to own PRs only.
+func TestHandlePullRequests_OthersLegFails(t *testing.T) {
+	runner := testutil.NewMockRunner(t)
+	runner.Expect(ghPRListArgs("org/repo", true)).SetOutput([]byte(`[{"headRefName":"alice/x","url":"https://github.com/org/repo/pull/1","number":1,"isDraft":false}]`))
+	runner.Expect(ghPRListArgs("org/repo", false)).SetError(fmt.Errorf("HTTP 502"))
+	defer runner.Verify()
+	srv := prTestServer(t, runner, "git@github.com:org/repo.git")
+
+	w := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pull-requests", nil))
+	var prs []PullRequest
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&prs))
+	require.Len(t, prs, 1)
+	assert.True(t, prs[0].Mine)
+}
+
+// The @me leg is authoritative: without it own PRs would come back
+// mine=false (chip/revset vanish), so it failing = whole fetch failing.
+func TestHandlePullRequests_MineLegFails(t *testing.T) {
+	runner := testutil.NewMockRunner(t)
+	runner.Expect(ghPRListArgs("org/repo", true)).SetError(fmt.Errorf("HTTP 502"))
+	runner.Expect(ghPRListArgs("org/repo", false)).SetOutput([]byte(`[{"headRefName":"alice/x","url":"https://github.com/org/repo/pull/1","number":1,"isDraft":false}]`))
+	defer runner.Verify()
+	srv := prTestServer(t, runner, "git@github.com:org/repo.git")
+
+	w := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pull-requests", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var prs []PullRequest
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&prs))
+	assert.Empty(t, prs)
 }
 
 func TestHandlePullRequests_GhError(t *testing.T) {
 	// gh not installed / not authed / wrong repo → empty list, no 500.
 	runner := testutil.NewMockRunner(t)
-	runner.Expect(ghPRListArgs("org/repo")).SetError(fmt.Errorf("gh: not authenticated"))
+	runner.Expect(ghPRListArgs("org/repo", true)).SetError(fmt.Errorf("gh: not authenticated"))
+	runner.Expect(ghPRListArgs("org/repo", false)).SetError(fmt.Errorf("gh: not authenticated"))
 	defer runner.Verify()
 	srv := prTestServer(t, runner, "https://github.com/org/repo")
 
@@ -3315,7 +3424,8 @@ func TestHandlePullRequests_GhError(t *testing.T) {
 
 func TestHandlePullRequests_InvalidJSON(t *testing.T) {
 	runner := testutil.NewMockRunner(t)
-	runner.Expect(ghPRListArgs("org/repo")).SetOutput([]byte("not json"))
+	runner.Expect(ghPRListArgs("org/repo", true)).SetOutput([]byte("not json"))
+	runner.Expect(ghPRListArgs("org/repo", false)).SetOutput([]byte("not json"))
 	defer runner.Verify()
 	srv := prTestServer(t, runner, "git@github.com:org/repo.git")
 
@@ -3777,6 +3887,8 @@ func TestUnifiedSuccessEnvelope(t *testing.T) {
 		defer runner.Verify()
 		srv := newTestServer(runner)
 		srv.Watcher = &Watcher{subs: make(map[chan sseEvent]struct{}), srv: srv}
+		_, unsub := srv.Watcher.subscribe() // a viewing browser — else 409
+		defer unsub()
 
 		w := httptest.NewRecorder()
 		srv.Mux.ServeHTTP(w, jsonPost("/api/navigate", []byte(`{"change_id":"abc"}`)))
@@ -3969,6 +4081,21 @@ func TestHandleNavigate(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("navigate not broadcast")
 	}
+}
+
+// No subscriber on this tab's stream (browser is viewing another tab, or no
+// browser at all) → 409, not a silent 200. The multi-tab CLI auto-targets the
+// cwd's tab, which is frequently NOT the one the user has open.
+func TestHandleNavigate_NoSubscriber409(t *testing.T) {
+	runner := testutil.NewMockRunner(t)
+	defer runner.Verify()
+	srv := newTestServer(runner)
+	srv.Watcher = &Watcher{subs: make(map[chan sseEvent]struct{}), srv: srv}
+
+	w := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(w, jsonPost("/api/navigate", []byte(`{"change_id":"abc"}`)))
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "no browser is subscribed")
 }
 
 func TestHandleNavigate_ReMarshalsSSEInjection(t *testing.T) {

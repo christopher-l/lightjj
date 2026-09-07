@@ -293,13 +293,23 @@ Content-Type: application/json
 {"change_id": "wqnwkozp", "file_path": "src/handlers.go"}
 ```
 
-→ `200`. The connected browser switches to that revision and scrolls the diff
-to that file. Use this to walk the user through a review: post a batch of
-comments, then `navigate` to the first one. At least one of `change_id`,
-`file_path`, or `comment_id` is required; `line` is accepted but currently
-ignored. `503` if the server was started with `--no-watch` (no SSE channel to
-push through). Ignored if the user is mid-rebase/squash/merge/doc-mode —
-they'll see an info toast instead.
+→ `200` = the hint was *delivered* to a connected browser, which then switches
+to that revision and scrolls the diff to that file. Delivery is best-effort,
+not confirmation: if the revision isn't in the user's current log (or the ref
+is ambiguous there) they see a "not in current revset" toast instead, and a
+user mid-rebase/squash/merge/doc-mode gets an "ignored" toast. Confirm with
+`GET /api/focus` if it matters. Use this to walk the user through a review:
+post a batch of comments, then `navigate` to the first one. At least one of
+`change_id`, `file_path`, or `comment_id` is required; `line` is accepted but
+currently ignored. `change_id` is matched against the user's **visible** log:
+the full id (`jj log -T change_id`) or any prefix that is unique among those
+rows works — prefer the full id; `navigate` does not widen the revset the way
+a `?change=` link does. `503` if the server was started with `--no-watch` (no
+SSE channel). `409` if no browser is subscribed to this tab's events — the UI
+only listens on the tab it has open, so a navigate aimed at a background tab
+can't land; ask the user to switch to it (or hand them a `?change=` link,
+below) and retry. A `409` can also be transient during a browser reconnect;
+one retry after a second is reasonable.
 
 To jump straight to a specific comment, send `comment_id` (the `id` you got
 back from `POST /api/doc-comments` or from a `GET` poll):

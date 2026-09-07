@@ -34,10 +34,18 @@ describe('TabBar', () => {
     const onswitch = vi.fn()
     const onclose = vi.fn()
     const { container } = render(TabBar, { tabs, activeId: '0', onswitch, onopen: noop, onclose })
-    const close = container.querySelectorAll('.tab-close')[1]
-    await fireEvent.click(close)
+    // Only tab 1 carries a ✕ — the launch tab (id 0) is never closable.
+    const closes = container.querySelectorAll('.tab-close')
+    expect(closes.length).toBe(1)
+    await fireEvent.click(closes[0])
     expect(onclose).toHaveBeenCalledWith('1')
     expect(onswitch).not.toHaveBeenCalled()
+  })
+
+  it('launch tab (id 0) never shows a close ×', () => {
+    const { container } = render(TabBar, { tabs, activeId: '1', onswitch: noop, onopen: noop, onclose: noop })
+    const first = container.querySelectorAll('.tab')[0]
+    expect(first.querySelector('.tab-close')).toBeNull()
   })
 
   it('hides close × when only one tab (cannot close last)', () => {

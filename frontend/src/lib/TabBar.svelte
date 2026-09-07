@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { TabInfo } from './api'
-  import { groupTabs, type TabGroup } from './tab-groups'
+  import { groupTabs, type TabGroup, isClosableTab } from './tab-groups'
 
   let {
     tabs,
@@ -111,14 +111,14 @@
     class:active={t.id === activeId}
     onclick={() => { if (t.id !== activeId) onswitch(t.id) }}
     oncontextmenu={(e) => { e.preventDefault(); onTabMenu?.(t, e.clientX, e.clientY) }}
-    title={t.path}
+    title={isClosableTab(t) ? t.path : `${t.path} — launch repo (always open)`}
   >
     <span class="tab-glyph">{glyph}</span>
     <span class="tab-name">{tabLabel(g, t)}</span>
     <!-- Solo tabs carry the icon inline; grouped tabs carry it on the chip. -->
     {#if g.tabs.length === 1 && wsCountFor(g.key) >= 2}{@render wsIcon(g.key)}{/if}
     {#if t.stale}<span class="stale-dot" title="stale working copy"></span>{/if}
-    {#if tabs.length > 1}
+    {#if tabs.length > 1 && isClosableTab(t)}
       <span
         class="close-btn tab-close"
         role="button"

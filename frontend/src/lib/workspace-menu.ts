@@ -6,7 +6,7 @@
 
 import type { ContextMenuItem } from './ContextMenu.svelte'
 import type { TabInfo, WorkspacesResponse } from './api'
-import { tabGroupKey } from './tab-groups'
+import { isClosableTab, tabGroupKey } from './tab-groups'
 
 /** Normalize a tab's workspace name — an unresolved wsName reads as "default"
  *  so it matches the workspace list's canonical default entry. */
@@ -81,8 +81,10 @@ export interface TabMenuOpts {
   tab: TabInfo
   /** Total open tabs — Close tab is disabled when it would close the last one. */
   tabCount: number
-  /** Tabs in this tab's group — Close group only shows for chips (> 1). */
-  groupTabCount: number
+  /** Tabs in this tab's group — Close group only shows for chips (> 1). The
+   *  launch tab is never closable, so the label counts (and closeGroup closes)
+   *  only the closable ones; a chip of launch-tab + 1 reads "Close group (1 tab)". */
+  groupTabs: Pick<TabInfo, 'id'>[]
   /** Workspace section to prepend (omit → no section, e.g. single-workspace
    *  repo). Included only when the repo has ≥ 2 workspaces. */
   section?: WorkspaceSectionOpts
@@ -96,14 +98,22 @@ export function tabMenuItems(o: TabMenuOpts): ContextMenuItem[] {
   if (o.section && o.section.ws.workspaces.length >= 2) {
     items.push(...workspaceSectionItems(o.section), { separator: true })
   }
+  const launch = !isClosableTab(o.tab)
   items.push({
-    label: 'Close tab',
-    disabled: o.tabCount <= 1,
+    // The launch tab can't close (server refuses); say why instead of a bare
+    // greyed item that reads as a rendering bug.
+    label: launch ? 'Close tab (launch repo — stays open)' : 'Close tab',
+    disabled: o.tabCount <= 1 || launch,
     action: () => o.onCloseTab(o.tab.id),
   })
-  if (o.groupTabCount > 1 && o.onCloseGroup) {
+  const closable = o.groupTabs.filter(isClosableTab).length
+  if (o.groupTabs.length > 1 && o.onCloseGroup) {
     items.push({
-      label: `Close group (${o.groupTabCount} tabs)`,
+      // From the launch tab, "Close group" would close everything BUT the tab
+      // you clicked — name that honestly.
+      label: launch
+        ? `Close other tabs in group (${closable})`
+        : `Close group (${closable} tab${closable === 1 ? '' : 's'})`,
       danger: true,
       action: o.onCloseGroup,
     })

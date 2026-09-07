@@ -19,6 +19,7 @@
   import { createFileActions } from './file-actions.svelte'
   import DiffFileView, { type DiffLineInfo } from './DiffFileView.svelte'
   import SearchResults from './SearchResults.svelte'
+  import SplitToggle from './SplitToggle.svelte'
   import ReviewJumpList from './ReviewJumpList.svelte'
   import FileComparePicker from './FileComparePicker.svelte'
   import FileSelectionPanel from './FileSelectionPanel.svelte'
@@ -1840,12 +1841,7 @@
           <span class="ann-hint"><kbd class="nav-hint">{symbolModKey}</kbd> hover definition</span>
         {/if}
       </div>
-      <button
-        class="btn btn-sm"
-        onclick={toggleSplitView}
-        title={splitView ? 'Split view — click for unified' : 'Unified view — click for split'}
-        aria-label={splitView ? 'Switch to unified view' : 'Switch to split view'}
-      >{splitView ? '◫' : '≡'}</button>
+      <SplitToggle split={splitView} onclick={toggleSplitView} hint="|" />
     </div>
   {/if}
   {#if searchOpen}

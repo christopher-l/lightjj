@@ -161,12 +161,6 @@
     border-top: none;
   }
 
-  .panel-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
   .oplog-content {
     overflow-y: auto;
     font-size: var(--fs-md);

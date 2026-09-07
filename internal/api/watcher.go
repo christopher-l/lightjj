@@ -593,9 +593,17 @@ func (w *Watcher) subscribe() (ch chan sseEvent, unsubscribe func()) {
 // payload is a server-marshaled JSON blob (handleNavigate validates and
 // re-marshals so untrusted input can't smuggle SSE framing). Dropped if no
 // subscribers or all buffers full — navigation is best-effort steering, not
-// state, so there's no edge to lose (unlike evStaleWC).
-func (w *Watcher) Navigate(payload []byte) {
+// state, so there's no edge to lose (unlike evStaleWC). Returns false when
+// no browser is subscribed to THIS tab's stream: the browser holds an
+// EventSource only for the active tab, so a navigate aimed at a background
+// tab would otherwise 200 and silently vanish — handleNavigate turns false
+// into a 409 the agent can act on.
+func (w *Watcher) Navigate(payload []byte) bool {
+	if !w.hasSubscribers() {
+		return false
+	}
 	w.broadcast(navEvent(payload))
+	return true
 }
 
 // broadcast fans an event out to all subscribers without blocking. A slow

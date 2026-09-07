@@ -118,6 +118,7 @@ frontend/                  — Svelte 5 SPA (Vite + TypeScript + pnpm)
     FileHistoryPanel.svelte — Two-cursor file history overlay
     FileHistoryRail.svelte — Reusable file-history revision rail (two-tier mutable→full loading)
     FileComparePicker.svelte — Compare a file against another revision (FileHistoryRail + diffRange)
+    SplitToggle.svelte     — ◫/≡ split/unified button (glyph + a11y strings); parent owns the boolean
     DescriptionEditor.svelte — Inline commit message editor
     CommandPalette.svelte  — Fuzzy-search command palette (Cmd+K) with submenus
     ContextMenu.svelte     — Reusable right-click context menu
@@ -128,7 +129,7 @@ frontend/                  — Svelte 5 SPA (Vite + TypeScript + pnpm)
     BookmarksPanel.svelte  — Branches view: bookmark list (sortable Priority/Recent/Name, author shown + filterable)
     bookmark-sync.ts       — classifyBookmark() → 8 sync states + sort/format helpers + canCreatePR/prCompareUrl (Create PR)
     workspace-recovery.ts  — PURE — planRecoverAll()/recoverAllMessage() for "Update all (recover stale)"
-    tab-groups.ts          — PURE — groupTabs()/tabGroupKey()/colorFor(): tab→repo grouping shared by TabBar + AppShell + App palette
+    tab-groups.ts          — PURE — groupTabs()/tabGroupKey()/colorFor() + LAUNCH_TAB_ID/isClosableTab(): tab→repo grouping + the one closability predicate, shared by TabBar + AppShell + App palette
     workspace-menu.ts      — PURE — workspaceSectionItems()/tabMenuItems(): builds the tab `◇N`/right-click menu items (AppShell injects callbacks)
     remote-visibility.ts   — buildVisibilityRevset(): per-remote visibility → revset string
     url-intent.ts          — PURE — routable-URL grammar (?change=/&revset=/&path=): parse/strip, changeLink(), ref→row unique-prefix match, widen-once locatorRevset (never all())
@@ -240,7 +241,7 @@ frontend/                  — Svelte 5 SPA (Vite + TypeScript + pnpm)
   - Dim/secondary **text** color: `--text-faint` (`color-mix(--text 45%, transparent)` — derived, so legible on every theme polarity). **Never use `--surface2` as a text `color`** — it's the gray ramp's darkest *border* step and collapses into the background in dark themes (issue #13). `--surface2` stays for `border-color`/dividers only.
   - Buttons: `.btn` (ghost), `.btn-sm` (compact), `.btn-primary` (filled amber), `.btn-danger` (red outline → fill on hover)
   - Toggle: `.seg`/`.seg-btn`/`.active` (segmented control)
-  - Panel chrome: `.panel-header`, `.panel-title`
+  - Panel chrome: `.panel-header`, `.panel-title`, `.panel-actions` (right-aligned header button cluster)
   - Modal chrome: `.modal-backdrop`, `.modal`, `.modal-header`, `.modal-input`
   - Prose: `.prose` — rendered-markdown typography (heading scale + h1/h2 underlines, leading, code/pre/blockquote, table stripes). MarkdownPreview + DocView both use it; don't redefine per-component.
   - Misc: `.close-btn` (borderless ×), `.placeholder-text` (dimmed "(no description)"), `.nav-hint` (kbd badge)

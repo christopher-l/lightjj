@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chronologos/lightjj/internal/jj"
@@ -470,10 +471,15 @@ func (s *Server) handleFileShow(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, map[string]string{"content": string(output)})
 }
 
-// commitIdRe matches 40+ lowercase hex — the frontend passes diffTarget.commitId
-// (content hash, immutable). Shorter values are change_ids or symbolic refs
-// which CAN move, so those skip the aggressive cache.
-var commitIdRe = regexp.MustCompile(`^[a-f0-9]{40,}$`)
+// commitIdRe matches 12+ lowercase hex: Commit.commit_id / parent_ids are jj's
+// `.short()` form (12 hex; full 40 also fine). A hex commit-id prefix is
+// content-addressed — it can become ambiguous (jj errors → 404) but never
+// resolve to different bytes, so the immutable cache is safe PROVIDED jj
+// resolves it as a commit id: bare symbols resolve tag → bookmark → id, so
+// handleFileRaw wraps matches in jj.CommitIdRevset (a bookmark named
+// `deadbeefcafe` can't pin its movable bytes under an immutable URL).
+// Change_ids (z–k alphabet) and symbolic refs aren't pure hex → no cache.
+var commitIdRe = regexp.MustCompile(`^[a-f0-9]{12,}$`)
 
 // handleFileRaw serves file bytes at a revision with a browser-usable
 // Content-Type. Feeds <img src> in markdown preview so images work in SSH
@@ -495,7 +501,15 @@ func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	output, err := s.Runner.ReadBytes(r.Context(), jj.FileShow(revision, filepath.ToSlash(cleaned), false))
+	// Content-addressed ⇔ pure-hex commit id. Only then is the year-long
+	// immutable cache below sound, and only if jj can't resolve the symbol as
+	// a same-named tag/bookmark instead — so pin resolution with commit_id().
+	immutable := commitIdRe.MatchString(revision)
+	rev := revision
+	if immutable && s.jjSupports(r.Context(), jj.CommitIdRevsetFn) {
+		rev = jj.CommitIdRevset(revision)
+	}
+	output, err := s.Runner.ReadBytes(r.Context(), jj.FileShow(rev, filepath.ToSlash(cleaned), false))
 	if err != nil {
 		s.writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -511,7 +525,7 @@ func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
 	// style-src for SVG's internal <style> (beautiful-mermaid emits one);
 	// everything else denied — scripts, frames, connects, objects.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-	if commitIdRe.MatchString(revision) {
+	if immutable {
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	}
 	w.Write(output)
@@ -612,7 +626,13 @@ func (s *Server) handleNavigate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	js, _ := json.Marshal(req)
-	s.Watcher.Navigate(js)
+	if !s.Watcher.Navigate(js) {
+		// No EventSource on this tab's stream = the browser is viewing a
+		// different tab (or none is open). 409 so the agent learns the
+		// steer didn't land instead of assuming the user now sees it.
+		s.writeError(w, http.StatusConflict, "no browser is subscribed to this tab's events (the UI only listens on the tab it has open) — ask the user to switch to it, or hand them a ?change= link, then retry")
+		return
+	}
 	// Standard MutationResult envelope (empty output) — same success shape as
 	// every other POST so clients need exactly one response type.
 	s.writeJSON(w, r, http.StatusOK, map[string]string{"output": ""})
@@ -1780,22 +1800,97 @@ type PullRequest struct {
 	URL      string `json:"url"`
 	Number   int    `json:"number"`
 	IsDraft  bool   `json:"is_draft"`
+	// Mine: authored by the gh-authenticated user. Aggregate UI (the "PRs"
+	// chip count + its revset, the palette entry) counts only these; per-
+	// bookmark badges and Create-PR eligibility use every entry.
+	Mine bool `json:"mine"`
+	// Author login — shown on non-mine badges ("PR #7 by bob") so a
+	// colleague's PR on a branch you have locally is visibly not yours.
+	Author string `json:"author,omitempty"`
 }
 
-// ghPRListArgs builds the gh invocation for listing the current user's open
-// PRs. --repo lets gh skip git-dir discovery, so this works from secondary
-// workspaces (no .git/) and any cwd. repo is "owner/name" — STATIC server
-// value from resolveGHRepo, never request-derived (flows to a remote shell
-// via SSHRunner.wrapRaw).
-func ghPRListArgs(repo string) []string {
-	return []string{
+// ghPRListArgs builds the gh invocation for listing open PRs. --repo lets gh
+// skip git-dir discovery, so this works from secondary workspaces (no .git/)
+// and any cwd. repo is "owner/name" — STATIC server value from resolveGHRepo,
+// never request-derived (flows to a remote shell via SSHRunner.wrapRaw).
+//
+// Two shapes, both issued per fetch (see handlePullRequests): mine=true is
+// `--author @me` — guaranteed to include the user's own PRs even on repos with
+// thousands open, where they'd fall outside any recency window; mine=false is
+// the most-recent 100 by anyone (one GraphQL page — gh paginates at 100), so a
+// colleague's branch you have locally (reviewing, stacked on) gets its badge
+// too. isCrossRepository lets the merge drop OTHER people's fork PRs, whose
+// headRefName ("main", "fix") would false-match a same-named local bookmark.
+func ghPRListArgs(repo string, mine bool) []string {
+	args := []string{
 		"gh", "pr", "list",
 		"--repo", repo,
 		"--state", "open",
-		"--author", "@me",
-		"--json", "headRefName,url,number,isDraft",
+		"--json", "headRefName,url,number,isDraft,isCrossRepository,author",
 		"--limit", "100",
 	}
+	if mine {
+		args = append(args, "--author", "@me")
+	}
+	return args
+}
+
+// ghPRList runs one ghPRListArgs shape and parses it. Errors are returned, not
+// logged — the caller decides (one shape failing shouldn't blank the other).
+func (s *Server) ghPRList(ctx context.Context, repo string, mine bool) ([]ghPR, error) {
+	out, err := s.Runner.RunRaw(ctx, ghPRListArgs(repo, mine))
+	if err != nil {
+		return nil, err
+	}
+	var prs []ghPR
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("gh output not JSON: %w", err)
+	}
+	return prs, nil
+}
+
+type ghPR struct {
+	HeadRefName       string `json:"headRefName"`
+	URL               string `json:"url"`
+	Number            int    `json:"number"`
+	IsDraft           bool   `json:"isDraft"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
+	Author            struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+func (g ghPR) toPullRequest(mine bool) PullRequest {
+	return PullRequest{Bookmark: g.HeadRefName, URL: g.URL, Number: g.Number, IsDraft: g.IsDraft, Mine: mine, Author: g.Author.Login}
+}
+
+// ghPRURLPrefix: pr.url flows into <a href> and window.open() in the UI. gh
+// emits GitHub-canonical URLs, but in SSH mode `gh` runs on the remote host —
+// so enforce the shape at the trust boundary rather than assume it (a
+// `javascript:` URL would execute in lightjj's origin).
+const ghPRURLPrefix = "https://github.com/"
+
+// mergePRLists: mine first (authoritative for the user's own), then others'
+// SAME-repo PRs not already seen — the recent window usually overlaps the @me
+// set, so dedupe by number. Entries with a non-GitHub URL are dropped. Pure;
+// never nil (JSON `[]`).
+func mergePRLists(mine, others []ghPR) []PullRequest {
+	prs := make([]PullRequest, 0, len(mine)+len(others))
+	seen := make(map[int]struct{}, len(mine))
+	for _, g := range mine {
+		if !strings.HasPrefix(g.URL, ghPRURLPrefix) {
+			continue
+		}
+		seen[g.Number] = struct{}{}
+		prs = append(prs, g.toPullRequest(true))
+	}
+	for _, g := range others {
+		if _, dup := seen[g.Number]; dup || g.IsCrossRepository || !strings.HasPrefix(g.URL, ghPRURLPrefix) {
+			continue
+		}
+		prs = append(prs, g.toPullRequest(false))
+	}
+	return prs
 }
 
 // githubRepoFromURL extracts "owner/repo" from a GitHub remote URL.
@@ -1895,35 +1990,28 @@ func (s *Server) handlePullRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := s.Runner.RunRaw(r.Context(), ghPRListArgs(repo))
-	if err != nil {
-		log.Printf("pull-requests: gh failed (badges disabled): %v", err)
+	// Both shapes concurrently — each is a ~0.5–1s network round trip and the
+	// endpoint is already throttled + op-id-driven client-side.
+	var mine, others []ghPR
+	var mineErr, othersErr error
+	var wg sync.WaitGroup
+	wg.Go(func() { mine, mineErr = s.ghPRList(r.Context(), repo, true) })
+	wg.Go(func() { others, othersErr = s.ghPRList(r.Context(), repo, false) })
+	wg.Wait()
+	if mineErr != nil {
+		// The @me leg is authoritative: without it we can't tell the user's
+		// own PRs from colleagues', and serving `others` alone would flip
+		// every own PR to mine=false (PRs chip/revset vanish). Treat as the
+		// whole fetch failing — same silent empty as gh-not-installed.
+		log.Printf("pull-requests: gh failed (badges disabled): %v", mineErr)
 		s.writeJSON(w, r, http.StatusOK, empty)
 		return
 	}
-
-	var ghPRs []struct {
-		HeadRefName string `json:"headRefName"`
-		URL         string `json:"url"`
-		Number      int    `json:"number"`
-		IsDraft     bool   `json:"isDraft"`
+	if othersErr != nil {
+		// Bonus leg only — degrade to the user's own PRs.
+		log.Printf("pull-requests: gh (all-authors leg) failed, showing own PRs only: %v", othersErr)
 	}
-	if err := json.Unmarshal(out, &ghPRs); err != nil {
-		log.Printf("pull-requests: gh output not JSON (badges disabled): %v", err)
-		s.writeJSON(w, r, http.StatusOK, empty)
-		return
-	}
-
-	prs := make([]PullRequest, len(ghPRs))
-	for i, gh := range ghPRs {
-		prs[i] = PullRequest{
-			Bookmark: gh.HeadRefName,
-			URL:      gh.URL,
-			Number:   gh.Number,
-			IsDraft:  gh.IsDraft,
-		}
-	}
-	s.writeJSON(w, r, http.StatusOK, prs)
+	s.writeJSON(w, r, http.StatusOK, mergePRLists(mine, others))
 }
 
 // handleGitHubRepo returns the resolved "owner/repo" for the current remote,

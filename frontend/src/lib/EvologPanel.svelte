@@ -172,12 +172,6 @@
     font-weight: 400;
   }
 
-  .panel-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
   .evolog-body {
     flex: 1;
     display: flex;

@@ -9,13 +9,11 @@
     workspacesForTab, workspaceAddForTab, workspaceUpdateStaleForTab, updateStaleWorkspaceForTab,
     type TabInfo, type WorkspacesResponse,
   } from './lib/api'
-  import { groupTabs, tabGroupKey, type TabGroup } from './lib/tab-groups'
+  import { LAUNCH_TAB_ID, groupTabs, isClosableTab, tabGroupKey, type TabGroup } from './lib/tab-groups'
   import { workspaceSectionItems, tabMenuItems, type WorkspaceSectionOpts } from './lib/workspace-menu'
   import { planRecoverAll, recoverAllMessage } from './lib/workspace-recovery'
   import { parseUrlIntent, stripUrlIntent } from './lib/url-intent'
 
-  // Tab 0 is the launch repo (the `-R` flag); api.ts's basePath defaults to it.
-  const LAUNCH_TAB_ID = '0'
 
   let tabs: TabInfo[] = $state([])
   let activeTabId: string = $state(LAUNCH_TAB_ID)
@@ -139,10 +137,10 @@
       items: tabMenuItems({
         tab,
         tabCount: tabs.length,
-        groupTabCount: group?.tabs.length ?? 1,
+        groupTabs: group?.tabs ?? [tab],
         section: sectionOpts(groupKey),
         onCloseTab: handleClose,
-        onCloseGroup: group && group.tabs.length > 1 ? () => closeGroup(group) : undefined,
+        onCloseGroup: group ? () => closeGroup(group) : undefined,
       }),
       x, y,
     }
@@ -202,8 +200,10 @@
   }
 
   async function closeGroup(group: TabGroup) {
-    // Snapshot the tab list — handleClose mutates `tabs` under us.
-    for (const t of [...group.tabs]) await handleClose(t.id)
+    // Snapshot the tab list — handleClose mutates `tabs` under us. The launch
+    // tab is skipped (server refuses it); closing the rest of its group is the
+    // useful reading of "Close group" there.
+    for (const t of group.tabs.filter(isClosableTab)) await handleClose(t.id)
   }
 
   function switchTab(id: string) {
@@ -239,6 +239,7 @@
 
   async function handleClose(id: string) {
     shellMessage = null
+    if (id === LAUNCH_TAB_ID) return // never offered by the UI; server would 400
     // Switch away first so App unmounts cleanly (its wireAutoRefresh cleanup
     // closes the EventSource) before the backend tears down that tab's Server.
     if (id === activeTabId) {

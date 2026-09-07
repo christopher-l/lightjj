@@ -1,7 +1,7 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity'
   import { createWindower, type VirtualItem } from './virtual.svelte'
-  import { effectiveId, type LogEntry, type PullRequest, type RemoteRef, type RemoteVisibility } from './api'
+  import { effectiveId, prLabel, type LogEntry, type PullRequest, type RemoteRef, type RemoteVisibility } from './api'
   import { targetModeLabel, type ModeKind, type RebaseMode, type SquashMode, type SplitMode, type MegamergeMode } from './modes.svelte'
   import { relativeTime } from './time-format'
   import GraphSvg from './GraphSvg.svelte'
@@ -482,10 +482,13 @@
                 {@const pr = prByBookmark.get(bm.name)}
                 {@const tinted = !!laneColorVar && !bm.conflict}
                 {#if pr}
+                  <!-- oncontextmenu: same bookmark menu as the plain badge — without it the
+                       event bubbles to the ROW handler and opens the revision menu. -->
                   <a class="pr-badge" class:is-draft={pr.is_draft} class:conflicted={bm.conflict}
                      href={pr.url} target="_blank" rel="noopener"
                      onclick={(e: MouseEvent) => e.stopPropagation()}
-                     title="{pr.is_draft ? 'Draft ' : ''}PR #{pr.number}{bm.unsynced && !bm.conflict ? ' — local out of sync with remote' : ''} — click to open on GitHub"
+                     oncontextmenu={(e: MouseEvent) => { if (!onbookmarkcontextmenu) return; e.preventDefault(); e.stopPropagation(); if (anyModeActive || isRefreshing) return; onbookmarkcontextmenu(bm.name, e.clientX, e.clientY) }}
+                     title="{prLabel(pr)}{bm.unsynced && !bm.conflict ? ' — local out of sync with remote' : ''} — click to open on GitHub"
                      style={tinted ? `--lane-color: ${laneColorVar}` : ''} class:lane-tinted={tinted}>
                     <span class="pr-name">↗ {bm.name}{#if bm.conflict}<span class="conflict-marker">??</span>{:else if bm.unsynced}<span class="sync-marker">*</span>{/if}</span>
                     <span class="pr-number">#{pr.number}</span>

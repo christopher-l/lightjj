@@ -776,6 +776,7 @@ func TestRunAPISubcommandExitCodes(t *testing.T) {
 		{301, 0},
 		{400, 4},
 		{404, 4},
+		{409, 4}, // navigate: no browser viewing the targeted tab
 		{422, 4},
 		{500, 5},
 		{502, 5},

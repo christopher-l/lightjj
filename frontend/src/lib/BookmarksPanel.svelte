@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import type { Bookmark, PullRequest, RemoteVisibility, RemoteVisibilityEntry } from './api'
+  import { prLabel, type Bookmark, type PullRequest, type RemoteVisibility, type RemoteVisibilityEntry } from './api'
   import { classifyBookmark, syncLabel, syncLabelAction, trackOptions, compareBookmarks, bookmarkSortTs, matchBookmark, type SyncState, type SortMode, type SortEntry, type TrackOption } from './bookmark-sync'
   import { fuzzyMatch } from './fuzzy'
   import { relativeTime } from './time-format'
@@ -592,7 +592,7 @@
                 <a class="bp-pr-badge" class:is-draft={pr.is_draft}
                    href={pr.url} target="_blank" rel="noopener"
                    onclick={(e) => e.stopPropagation()}
-                   title="{pr.is_draft ? 'Draft ' : ''}PR #{pr.number}">
+                   title={prLabel(pr)}>
                   #{pr.number}
                 </a>
               {/if}

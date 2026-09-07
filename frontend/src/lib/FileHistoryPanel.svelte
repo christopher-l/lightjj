@@ -1,15 +1,19 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { api, type LogEntry } from './api'
+  import { config } from './config.svelte'
   import { createLoader, DIFF_LOAD_DEBOUNCE_MS } from './loader.svelte'
   import { parseDiffContent } from './diff-parser'
   import { relativeTime, firstLine } from './time-format'
   import DiffFileView from './DiffFileView.svelte'
   import FileHistoryRail from './FileHistoryRail.svelte'
+  import SplitToggle from './SplitToggle.svelte'
 
   interface Props {
     path: string
-    /** commit_id to pre-pin as cursor A. If absent from the mutable-scoped
-     *  list, auto-triggers loadFull() to find it in the complete history. */
+    /** commit_id to pre-pin as A. When set the rail skips the mutable tier
+     *  and loads full history directly (the target is rarely WIP); if it's
+     *  not in that list either, A falls back to the newest row. */
     initialPin?: string | null
     onclose: () => void
   }
@@ -17,27 +21,33 @@
   let { path, initialPin, onclose }: Props = $props()
 
   // ── Two-cursor state ─────────────────────────────────────────────────────
-  // cursorB moves with j/k (rail owns it); pinnedA is fixed until Space re-pins.
+  // cursorB moves with j/k (rail owns it, identity-stable across list swaps);
+  // pin A is keyed by commit_id and its index DERIVED, so whichever history
+  // tier lands (and any later refetch) can't re-bind A to a different commit
+  // (CLAUDE.md: key selection by identity). initialPin seeds it; when set the
+  // rail gets startFull — the target is rarely mutable WIP. Not found (or no
+  // pin) → row 0, the newest. Space re-pins to the cursor's commit.
   let revisions: LogEntry[] = $state([])
   let cursorB = $state(0)
-  let pinnedA = $state(0)
+  // untrack: seed only — the prop never changes mid-lifetime ({#key} remounts
+  // per open); silences state_referenced_locally like App's initialState.
+  let pinnedId: string | null = $state(untrack(() => initialPin ?? null))
+  const pinIdx = (id: string | null) => id ? revisions.findIndex(r => r.commit.commit_id === id) : -1
+  let pinnedA = $derived(Math.max(0, pinIdx(pinnedId)))
+  // Latch an unresolved pin (none given, or initialPin absent from the list)
+  // onto the row it's displayed as — so a later list swap ("Load full
+  // history") carries A with that commit instead of re-binding to the new row 0.
+  $effect(() => {
+    if (revisions.length > 0 && pinIdx(pinnedId) < 0) pinnedId = revisions[0].commit.commit_id
+  })
   // bug_015: per-file collapse — diffRange can return multiple entries on renames.
   let collapsed = $state(new Set<string>())
   let railRef: FileHistoryRail | undefined = $state()
-
-  // ── initialPin resolution ────────────────────────────────────────────────
-  // When initialPin is set, the rail gets startFull={true} — skips the
-  // mutable-scoped tier entirely since the pin target is unlikely to be in
-  // WIP. Once the full list arrives, find and pin. {#key} remount resets the
-  // flag. Plain let (not $state) — only this effect reads it; $state would
-  // self-invalidate on the pinApplied=true write.
-  let pinApplied = false
-  $effect(() => {
-    if (pinApplied || !initialPin || revisions.length === 0) return
-    const idx = revisions.findIndex(r => r.commit.commit_id === initialPin)
-    if (idx >= 0) pinnedA = idx
-    pinApplied = true
-  })
+  // Split/unified is panel-LOCAL, seeded from the user's global choice. Never
+  // write config.splitView from here: DiffPanel is mounted underneath and its
+  // toggleSplitView() confirm guards an open FileEditor buffer — a config
+  // write would flip it via the $bindable and silently discard those edits.
+  let splitView = $state(untrack(() => config.splitView))
 
   let revA = $derived(revisions[pinnedA])
   let revB = $derived(revisions[cursorB])
@@ -71,7 +81,10 @@
     if (railRef?.handleKeydown(e)) return true
     switch (e.key) {
       case ' ':
-        pinnedA = cursorB
+        pinnedId = revisions[cursorB]?.commit.commit_id ?? null
+        return true
+      case '|':
+        splitView = !splitView
         return true
       case 'Escape':
         onclose()
@@ -88,7 +101,10 @@
 <div class="fh-root">
   <div class="fh-header">
     <span class="fh-title">File history: <code>{path}</code></span>
-    <button class="close-btn" onclick={onclose} title="Close (Escape)">✕</button>
+    <span class="panel-actions">
+      <SplitToggle split={splitView} onclick={() => splitView = !splitView} hint="|" />
+      <button class="close-btn" onclick={onclose} title="Close (Escape)">✕</button>
+    </span>
   </div>
 
   <div class="fh-body">
@@ -137,7 +153,7 @@
               fileStats={undefined}
               isCollapsed={collapsed.has(file.filePath)}
               isExpanded={false}
-              splitView={false}
+              {splitView}
               highlightedLines={EMPTY_HL}
               wordDiffs={EMPTY_WD}
               ontoggle={() => {
